@@ -45,3 +45,5 @@ scratch_*.py
 
 # Compiled by tools/build_velociloops.py
 src/core/native/
+AppDir/
+appimagetool-*.AppImage

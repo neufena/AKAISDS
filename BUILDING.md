@@ -16,13 +16,23 @@
 
 #### Windows
 
-- A C++ compiler
+- A C++ compiler: Visual Studio Build Tools (`cl`) or MinGW (`g++`) on `PATH`, for the REX2 reader. Nuitka downloads its own MinGW if it finds no MSVC
+- [uv](https://docs.astral.sh/uv/) and Git (uv fetches the pinned `s3ked` from GitHub)
+- Optional, for the installer: [Inno Setup 6](https://jrsoftware.org/isinfo.php)
 
 ## Setup and Build
 
 1. Clone repository with `git clone https://github.com/martincurkovic/AKAISDS.git`
 2. Run the relevant script for your platform (located in the `scripts` folder). Note that running a PowerShell script on Windows for the first time will trigger a warning but it can be mitigated by running `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` before running the build script. On Linux or macOS you _may_ need to run `chmod +x build_xxx.sh` on the relevant script for your platform
 3. Final build will land in the `src` directory
+
+#### Linux: devcontainer
+
+`.devcontainer/` has a Debian Trixie container with everything the Linux build needs. Inside it, `scripts/build_linux.sh` builds the app and `.devcontainer/build-linux-appimage.sh` also makes `AKAISDS-linux.AppImage`, as CI does.
+
+#### Windows: build on a Windows machine
+
+Nuitka can't cross-compile, so the Windows build is not done in the devcontainer. On a Windows host (or the `windows-latest` CI job): in PowerShell, from the repository root, run `.\scripts\build_windows.ps1` (the first time, `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`). The app lands in `src\AKAISDS.dist`. For the installer, then run `& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=<version> assets\windows\AKAISDS.iss`, where the version is the one in `src\ui\_version.py`; that produces `AKAISDS-Setup.exe`.
 
 #### macOS: two builds
 
