@@ -26,6 +26,7 @@ from core import (
     asrx_sysex,
     ensoniq_sysex,
     midi_identity,
+    s2k_client,
     s950_sysex,
     sampler_models,
 )
@@ -289,19 +290,75 @@ class MidiSettingsDialog(QDialog):
         editor_form.addRow(self.check_external_auto_load)
         editor_card = build_section_card("External Audio Editor", editor_form)
 
-        # one shared label-column width across all three cards, so every
+        s2k_form, s2k_card = self._build_s2k_card()
+
+        # one shared label-column width across all the cards, so every
         # entry field starts at the same x (each form would otherwise size
         # its own label column to its own widest label)
-        align_form_label_columns(midi_form, audio_form, appearance_form, editor_form)
+        align_form_label_columns(midi_form, s2k_form, audio_form, appearance_form, editor_form)
 
         page = QWidget()
         page_layout = QVBoxLayout(page)
         page_layout.addWidget(midi_card)
+        page_layout.addWidget(s2k_card)
         page_layout.addWidget(audio_card)
         page_layout.addWidget(appearance_card)
         page_layout.addWidget(editor_card)
         page_layout.addStretch()
         return page
+
+    def _build_s2k_card(self):
+        # sample audio over SCSI through an s2k-send server (controller/s2k_transfers.py); everything else stays on MIDI
+        form = QFormLayout()
+        self.check_s2k = QCheckBox("Send and receive samples over SCSI")
+        self.check_s2k.setChecked(app_config.get_s2k_enabled())
+        self.check_s2k.setToolTip(tooltips.S2K_ENABLED)
+        form.addRow(self.check_s2k)
+        self.edit_s2k_url = QLineEdit(app_config.get_s2k_server_url())
+        self.edit_s2k_url.setPlaceholderText(app_config.DEFAULT_S2K_SERVER_URL)
+        self.edit_s2k_url.setToolTip(tooltips.S2K_SERVER)
+        self.button_s2k_test = QPushButton("Test")
+        self.button_s2k_test.clicked.connect(self._test_s2k_server)
+        row = QHBoxLayout()
+        row.addWidget(self.edit_s2k_url, 1)
+        row.addWidget(self.button_s2k_test)
+        form.addRow(QLabel("s2k-send Server:"), row)
+        self.label_s2k_status = QLabel()
+        self.label_s2k_status.setWordWrap(True)
+        form.addRow(self.label_s2k_status)
+        self.combo_device_type.currentIndexChanged.connect(self._update_s2k_controls)
+        self._update_s2k_controls()
+        return form, build_section_card("Sample Transfers over SCSI", form)
+
+    def _s2k_model_supported(self):
+        return self.combo_device_type.currentData() == sampler_models.AKAI_S2000_S3000
+
+    def _update_s2k_controls(self):
+        supported = self._s2k_model_supported()
+        for widget in (self.check_s2k, self.edit_s2k_url, self.button_s2k_test):
+            set_enabled_without_scrolling(widget, supported)
+        self.label_s2k_status.setText(
+            "Sample audio only; everything else stays on MIDI."
+            if supported
+            else "Akai S2000/S3000 only."
+        )
+
+    def _test_s2k_server(self):
+        url = s2k_client.normalize_url(self.edit_s2k_url.text())
+        self.edit_s2k_url.setText(url)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            status = s2k_client.S2kClient(url, timeout=3.0).status()
+        except s2k_client.S2kError as e:
+            message = f"Couldn't reach the server: {e.message or e.code}"
+        else:
+            bus = status.get("bus") or {}
+            simulated = " (simulated S2000)" if bus.get("mock") else ""
+            message = f"Connected: {status.get('server', 'server')} {status.get('version', '')}, bus {bus.get('state', 'unknown')}{simulated}"
+        finally:
+            QApplication.restoreOverrideCursor()
+        debug_log.get_logger().info(f"MidiSettingsDialog: s2k-send test {url}: {message}")
+        self.label_s2k_status.setText(message)
 
     # --- Troubleshooting tab --------------------------------------------------
 
@@ -467,6 +524,9 @@ class MidiSettingsDialog(QDialog):
         app_config.save_audio_buffer_samples(self.combo_audio_buffer.currentData())
         app_config.save_external_editor(self.edit_external_editor.text())
         app_config.save_external_auto_load(self.check_external_auto_load.isChecked())
+        s2k_url = s2k_client.normalize_url(self.edit_s2k_url.text())
+        app_config.save_s2k_settings(self.check_s2k.isChecked(), s2k_url)
+        self.sampler_controller.set_s2k_server(s2k_url if self.check_s2k.isChecked() else None)
 
         self.accept()
 

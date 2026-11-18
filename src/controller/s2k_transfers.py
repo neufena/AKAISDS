@@ -1,7 +1,8 @@
 """Sending and receiving Akai S2000/S3000 samples through an s2k-send server (SCSI from a Raspberry Pi + PiSCSI) instead of MIDI.
 
-PROOF OF CONCEPT, NOT TRIED AGAINST A REAL SERVER. Only sample audio goes this way: the sample list, headers, programs and everything else
-stay on MIDI. Switched on by `AKAISDS_S2K_SERVER` (a server URL, or `1` for `DEFAULT_SERVER_URL`); there is no Settings UI yet.
+NOT TRIED AGAINST A REAL SERVER YET. Only sample audio goes this way: the sample list, headers, programs and everything else stay on
+MIDI. Switched on in Settings (`config.json` `s2k_enabled` / `s2k_server_url`); `AKAISDS_S2K_SERVER` (a URL, `1` for
+`DEFAULT_SERVER_URL`, or `off`) overrides that for development.
 
 Built lazily by `SamplerController` (like the S950/Yamaha engines) and reports through the controller's own signals, so the Dashboard and
 the Program Editor need no changes. The HTTP calls block, so each operation runs on a plain worker thread that only puts events on a
@@ -24,7 +25,7 @@ from PySide6.QtCore import QTimer
 from core import akai_sysex, debug_log, s2k_client, sds_encoder
 
 ENV_VAR = "AKAISDS_S2K_SERVER"
-DEFAULT_SERVER_URL = "http://piscsi.local:8420"
+DEFAULT_SERVER_URL = s2k_client.DEFAULT_URL
 _OFF = ("", "0", "false", "no", "off")
 _ON = ("1", "true", "yes", "on")
 
@@ -33,14 +34,17 @@ _JOB_POLL_S = 0.3
 _WRITE_PHASES = ("header", "audio")
 
 
-def server_url():
-    """The s2k-send server to use, or None to keep sample transfers on MIDI."""
+def server_url(configured=None):
+    """The s2k-send server to use, or None to keep sample transfers on MIDI. `configured` is the Settings choice; the environment
+    variable, when set, overrides it (for development: `off` forces MIDI)."""
     value = os.environ.get(ENV_VAR, "").strip()
+    if not value:
+        return s2k_client.normalize_url(configured) if configured else None
     if value.lower() in _OFF:
         return None
     if value.lower() in _ON:
         return DEFAULT_SERVER_URL
-    return value
+    return s2k_client.normalize_url(value)
 
 
 def _log():

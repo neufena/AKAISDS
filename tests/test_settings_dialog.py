@@ -94,8 +94,13 @@ class _FakeSamplerController:
     def is_open_loop(self):
         return False
 
+    s2k_server = None
+
     def set_channel(self, channel):
         self.channel = channel
+
+    def set_s2k_server(self, url):
+        self.s2k_server = url
 
     def set_device_type(self, selection):
         self.sampler_model = selection
@@ -699,3 +704,57 @@ def test_s950_hardware_test_reports_no_answer(qapp, monkeypatch):
     ports = _Silent()
     ok, message = _s950_dialog(qapp)._send_identity_request(ports, ports)
     assert not ok and "not found" in message
+
+
+# --- Sample Transfers over SCSI (s2k-send) card -------------------------------
+
+
+def test_the_s2k_card_saves_and_applies_the_server(qapp):
+    from core import app_config
+
+    controller = _FakeSamplerController()
+    dialog = MidiSettingsDialog(_FakeMidiManager(["In A"], ["Out A"]), controller)
+    assert not dialog.check_s2k.isChecked()
+    dialog.check_s2k.setChecked(True)
+    dialog.edit_s2k_url.setText("pi.local")
+    dialog._apply_and_close()
+    assert controller.s2k_server == "http://pi.local:8420"
+    assert app_config.get_s2k_enabled() and app_config.get_s2k_server_url() == "http://pi.local:8420"
+
+    dialog = MidiSettingsDialog(_FakeMidiManager(["In A"], ["Out A"]), controller)
+    assert dialog.check_s2k.isChecked()
+    dialog.check_s2k.setChecked(False)
+    dialog._apply_and_close()
+    assert controller.s2k_server is None
+    assert not app_config.get_s2k_enabled() and app_config.get_s2k_server_url() == "http://pi.local:8420"
+
+
+def test_the_s2k_card_is_only_for_the_s2000_s3000(qapp):
+    dialog = MidiSettingsDialog(_FakeMidiManager(["In A"], ["Out A"]), _FakeSamplerController())
+    assert dialog.check_s2k.isEnabled()
+    dialog.combo_device_type.setCurrentIndex(dialog.combo_device_type.findData("akai_s1000"))
+    assert not dialog.check_s2k.isEnabled() and not dialog.button_s2k_test.isEnabled()
+    assert "S2000/S3000 only" in dialog.label_s2k_status.text()
+
+
+def test_the_s2k_test_button_reports_an_unreachable_server(qapp, monkeypatch):
+    from core import s2k_client
+
+    def unreachable(self):
+        raise s2k_client.S2kError(0, "unreachable", "can't reach it")
+
+    monkeypatch.setattr(s2k_client.S2kClient, "status", unreachable)
+    dialog = MidiSettingsDialog(_FakeMidiManager(["In A"], ["Out A"]), _FakeSamplerController())
+    dialog._test_s2k_server()
+    assert dialog.label_s2k_status.text() == "Couldn't reach the server: can't reach it"
+
+
+def test_the_s2k_test_button_reports_the_server(qapp, monkeypatch):
+    from core import s2k_client
+
+    monkeypatch.setattr(
+        s2k_client.S2kClient, "status", lambda self: {"server": "s2kserver", "version": "0.7.0", "bus": {"state": "idle", "mock": True}}
+    )
+    dialog = MidiSettingsDialog(_FakeMidiManager(["In A"], ["Out A"]), _FakeSamplerController())
+    dialog._test_s2k_server()
+    assert dialog.label_s2k_status.text() == "Connected: s2kserver 0.7.0, bus idle (simulated S2000)"

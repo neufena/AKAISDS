@@ -78,6 +78,7 @@ class SamplerController(QObject):
         self._yamaha_transfers_engine = None  # the Dashboard's Yamaha list/receive - see _yamaha_transfers
         self._yamaha_engine = None  # built on first use - see _yamaha
         self._s2k_engine = None  # sample audio over SCSI through an s2k-send server - see _s2k
+        self.s2k_server = None  # that server's URL from Settings; None = samples go over MIDI
 
         self._open_loop_delay_ms = 40  # pacing for open loop sending
         # replies stopped MID-send after the sampler had been handshaking: finish the sample
@@ -270,12 +271,16 @@ class SamplerController(QObject):
     @property
     def _s2k(self):
         # the s2k-send server, when it is switched on and the model is an S2000/S3000; None keeps sample transfers on MIDI
-        url = s2k_transfers.server_url()
+        url = s2k_transfers.server_url(self.s2k_server)
         if url is None or self.device_type != "akai" or self.sampler_model != sampler_models.AKAI_S2000_S3000:
             return None
         if self._s2k_engine is None or self._s2k_engine.url != url:
             self._s2k_engine = s2k_transfers.S2kTransfers(self, url)
         return self._s2k_engine
+
+    def set_s2k_server(self, url):
+        self.s2k_server = url or None
+        debug_log.get_logger().info(f"SamplerController: sample transfers via {'s2k-send server ' + url if url else 'MIDI'}")
 
     def _s950_not_supported(self, what):
         # The S900/S950 speak neither protocol the Akai-family and generic-SDS

@@ -10,6 +10,8 @@ import urllib.error
 import urllib.request
 
 API = "/v1"
+DEFAULT_URL = "http://piscsi.local:8420"
+DEFAULT_PORT = 8420
 RATES = (44100, 22050)
 NAME_CHARS = frozenset("0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ#+-.")
 TERMINAL_STATES = ("done", "failed", "cancelled")
@@ -24,6 +26,20 @@ class S2kError(Exception):
         self.code = code
         self.message = message
         self.details = details or {}
+
+
+def normalize_url(url):
+    """What the user typed as a server address: `http://` is added when there is no scheme, the default port when there is none."""
+    url = (url or "").strip().rstrip("/")
+    if not url:
+        return DEFAULT_URL
+    if "://" not in url:
+        url = "http://" + url
+    scheme, rest = url.split("://", 1)
+    host = rest.split("/", 1)[0]
+    if ":" not in host.rsplit("]", 1)[-1]:
+        url = f"{scheme}://{host}:{DEFAULT_PORT}" + rest[len(host):]
+    return url
 
 
 def akai_name(name):

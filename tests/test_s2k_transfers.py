@@ -258,3 +258,37 @@ def test_the_client_turns_an_error_reply_into_s2k_error():
     with pytest.raises(s2k_client.S2kError) as caught:
         s2k_client.S2kClient("http://pi.test:8420", opener=opener).samples()
     assert (caught.value.status, caught.value.code) == (409, "busy")
+
+
+@pytest.mark.parametrize(
+    "typed, url",
+    [
+        ("piscsi.local", "http://piscsi.local:8420"),
+        ("http://10.0.0.5:9000/", "http://10.0.0.5:9000"),
+        ("10.0.0.5", "http://10.0.0.5:8420"),
+        ("", s2k_client.DEFAULT_URL),
+    ],
+)
+def test_a_typed_server_address_becomes_a_url(typed, url):
+    assert s2k_client.normalize_url(typed) == url
+
+
+def test_the_settings_choice_is_used_unless_the_environment_overrides_it(monkeypatch):
+    monkeypatch.delenv(s2k_transfers.ENV_VAR, raising=False)
+    assert s2k_transfers.server_url(None) is None
+    assert s2k_transfers.server_url("pi.local") == "http://pi.local:8420"
+    monkeypatch.setenv(s2k_transfers.ENV_VAR, "off")
+    assert s2k_transfers.server_url("pi.local") is None
+    monkeypatch.setenv(s2k_transfers.ENV_VAR, "http://other:1")
+    assert s2k_transfers.server_url("pi.local") == "http://other:1"
+
+
+def test_the_controller_follows_the_settings_server(qapp, monkeypatch):  # noqa: F811
+    monkeypatch.delenv(s2k_transfers.ENV_VAR, raising=False)
+    controller = SamplerController(_Midi())
+    controller.set_device_type(sampler_models.AKAI_S2000_S3000)
+    assert controller._s2k is None
+    controller.set_s2k_server("http://pi.test:8420")
+    assert controller._s2k.url == "http://pi.test:8420"
+    controller.set_s2k_server(None)
+    assert controller._s2k is None
