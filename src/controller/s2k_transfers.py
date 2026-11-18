@@ -46,7 +46,6 @@ _JOB_ERRORS = {
     "verify_failed": "S2K transfer sent, but a sample didn't read back the same - check it before using it",
     "list_mismatch": "S2K transfer sent, but the S2000's sample list isn't what was expected: power-cycle the S2000 and the Pi, run "
     "s2ksend --recover, then check the list",
-    "rehearsal_failed": "The S2K server refused the batch",
 }
 
 
@@ -80,7 +79,8 @@ def _unique(name, taken):
 
 def plan_units(entries, read_channels=sds_encoder.read_wav_channels):
     """The Dashboard's queue entries as the samples one job sends. Returns (units, skipped): each unit is a dict with file (its entry
-    index), name, rate and samples (16-bit ints); skipped is [(filepath, reason)] for files that couldn't be read."""
+    index), name, rate and samples (16-bit ints); skipped is [(filepath, reason)] for files that couldn't be read or whose rate the
+    server can't take."""
     units, skipped, taken = [], [], set()
     for index, entry in enumerate(entries):
         path = entry["filepath"]
@@ -91,6 +91,9 @@ def plan_units(entries, read_channels=sds_encoder.read_wav_channels):
             continue
         base = entry.get("name") or os.path.splitext(os.path.basename(path))[0]
         target = entry.get("sample_rate") or rate
+        if not s2k_client.MIN_RATE <= target <= s2k_client.MAX_RATE:
+            skipped.append((path, f"{target} Hz is outside the {s2k_client.MIN_RATE}-{s2k_client.MAX_RATE} Hz the S2000 can take"))
+            continue
         bits = entry.get("bit_depth", 16)
         if len(channels) == 2 and not entry.get("mono", False):
             legs = [
@@ -200,7 +203,7 @@ class S2kTransfers:
         if error.code == "needs_attention":
             return _NEEDS_ATTENTION
         if error.code == "bad_rate":
-            return f"The S2K server can't take that sample rate ({s2k_client.MIN_RATE}-{s2k_client.MAX_RATE} Hz) - nothing was sent"
+            return f"The S2K server can't take that sample rate ({error.message}) - nothing was sent"
         return f"S2K server: {error.message or error.code}"
 
     def _on_status(self, message):
@@ -265,7 +268,7 @@ class S2kTransfers:
         units, skipped = plan_units(entries)
         self._post(token, "planned", units, skipped)
         if not units:
-            self._post(token, "failed", "Nothing to send - no file could be read")
+            self._post(token, "failed", "Nothing to send - no file could be read at a rate the S2K server takes")
             return
         specs = [{"name": u["name"], "rate": u["rate"], "frames": len(u["samples"])} for u in units]
         job = self._call(self._client.create_job, specs)
@@ -278,8 +281,9 @@ class S2kTransfers:
             self._post(token, "status", f"Uploading {unit['name']} to the S2K server ({i + 1}/{len(units)})...")
             job = self._call(self._client.upload, job_id, i, s2k_client.pcm_from_samples(unit["samples"]))
         if job.get("state") != "ready":
-            error = job.get("error") or {}
-            self._post(token, "failed", f"The S2K server refused the batch: {error.get('message') or job.get('state')}")
+            job.setdefault("state", "failed")
+            job["bus_state"] = self._bus_state()
+            self._post(token, "send_ended", job)
             return
         with self._lock:
             if self._cancel.is_set():
@@ -300,7 +304,7 @@ class S2kTransfers:
                 last_progress = progress
                 self._post(token, "progress", dict(progress))
             if snap["state"] in s2k_client.TERMINAL_STATES:
-                if snap["state"] == "failed":
+                if snap["state"] != "done":
                     snap["bus_state"] = self._bus_state()
                 self._post(token, "send_ended", snap)
                 return
@@ -373,8 +377,12 @@ class S2kTransfers:
             code = error.get("code")
             if code in _JOB_ERRORS:
                 message = _JOB_ERRORS[code]
+                if code != "list_mismatch" and snap.get("bus_state") == "needs_attention":
+                    message += ". " + _NEEDS_ATTENTION
             elif code == "needs_attention" or snap.get("bus_state") == "needs_attention":
                 message = _NEEDS_ATTENTION
+            elif code == "rehearsal_failed":
+                message = f"The S2K server refused the batch: {error.get('message') or code}"
             else:
                 message = f"S2K transfer {state}: {error.get('message') or code or state}"
             if done_names and code != "list_mismatch":
@@ -383,12 +391,12 @@ class S2kTransfers:
         job_id = snap.get("id")
         _log().info(f"S2kTransfers: send ended {state} (job {job_id}): {result or error}")
         if not ok and job_id:
-            _log().warning(f"S2kTransfers: job {job_id} failed ({error.get('code')}, bus {snap.get('bus_state')}); "
+            _log().warning(f"S2kTransfers: job {job_id} ended {state} ({error.get('code')}, bus {snap.get('bus_state')}); "
                            f"evidence: s2ksend --server {self.url} --fetch-job {job_id}")
         for pair in result.get("pairs", []):
             linked = pair.get("linked")
-            state = "linked" if linked else "NOT linked"
-            line = f"S2kTransfers: stereo pair {pair.get('left')!r} / {pair.get('right')!r} {state} by the S2000"
+            link_state = "linked" if linked else "NOT linked"
+            line = f"S2kTransfers: stereo pair {pair.get('left')!r} / {pair.get('right')!r} {link_state} by the S2000"
             partners = f" (partners {pair.get('left_partner')}/{pair.get('right_partner')})"
             (_log().info if linked else _log().warning)(line + partners)
         self._finish()

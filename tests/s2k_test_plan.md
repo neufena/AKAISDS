@@ -72,8 +72,8 @@ Note each s2k-send result before you start, because AKAISDS relies on it:
 - [ ] **B8 Refused before writing.** (a) Send a file named the same as a resident sample: the batch is refused, the status says so,
       `s2ksend --list` is unchanged, `s2ksend --status` shows `bus: idle`. (b) If the S2000's free memory is small enough to fill
       with test files, a batch bigger than the free memory: same result.
-- [ ] **B8c Rate out of range.** A 96 kHz WAV at its own rate: "can't take that sample rate", nothing uploaded (`s2ksend --jobs`
-      shows no new job).
+- [ ] **B8c Rate out of range.** A 96 kHz WAV at its own rate in a batch with `kick.wav`: the 96 kHz one is skipped ("96000 Hz is
+      outside ..."), the kick goes over SCSI.
 - [ ] **B9 Cancel.** Cancel while it says "Uploading": nothing is sent (`s2ksend --jobs` shows the job `cancelled`). Cancel once it
       says "Sending over SCSI": the app says it can't be stopped and the job finishes.
 

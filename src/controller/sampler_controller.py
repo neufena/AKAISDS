@@ -1345,6 +1345,10 @@ class SamplerController(QObject):
             # the unit's own bulk load (wave + sample dumps) - not Sample Dump Standard; see controller/yamaha_transfers.py
             return self._yamaha_transfers.send_file_queue(file_entries)
         if self._s2k is not None:
+            if starting_sample_number is not None:
+                debug_log.get_logger().info(
+                    f"S2kTransfers: starting sample number {starting_sample_number} ignored - the server appends new samples"
+                )
             return self._s2k.send_file_queue(file_entries)
         if channel is None:
             channel = self.channel

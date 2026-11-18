@@ -204,6 +204,7 @@ def test_a_failed_job_reports_only_the_files_that_arrived(rig, tmp_path):
         ("verify_failed", "idle", "didn't read back the same"),
         ("send_failed", "needs_attention", "power-cycle the S2000 and the Pi"),
         ("send_failed", "idle", "bus error"),
+        ("verify_failed", "needs_attention", "power-cycle the S2000 and the Pi"),
     ],
 )
 def test_a_failed_job_says_what_to_do_next(rig, tmp_path, code, bus, expected):
@@ -359,15 +360,41 @@ def test_the_users_rate_choice_is_kept_and_nothing_else_is_resampled(rig, tmp_pa
     assert [(s["rate"], s["frames"]) for s in client.jobs["job0"]["samples"]] == [(32000, 320), (11025, 25)]
 
 
-def test_a_rate_the_server_refuses_fails_the_send_and_uploads_nothing(rig, tmp_path):
+def test_a_file_at_a_rate_the_server_cant_take_is_skipped_and_the_rest_goes(rig, tmp_path):
     controller, client, rec = rig
-    controller.send_file_queue([_entry(_wav(tmp_path, "a.wav")), _entry(_wav(tmp_path, "hi.wav", rate=96000))])
+    good, high = _wav(tmp_path, "a.wav"), _wav(tmp_path, "hi.wav", rate=96000)
+    controller.send_file_queue([_entry(good), _entry(high)])
+    assert wait_until(lambda: rec["finished"])
+    assert rec["finished"] == [True]
+    assert [spec["name"] for spec in client.jobs["job0"]["samples"]] == ["A"]
+    assert rec["files"] == [high, good]
+    assert any("96000 Hz is outside" in line for line in rec["status"])
+    assert not controller.midi_manager.sent
+
+
+def test_a_batch_only_at_rates_the_server_cant_take_sends_nothing(rig, tmp_path):
+    controller, client, rec = rig
+    controller.send_file_queue([_entry(_wav(tmp_path, "hi.wav", rate=96000))])
     assert wait_until(lambda: rec["finished"])
     assert rec["finished"] == [False]
     assert client.jobs == {}
-    assert "can't take that sample rate" in rec["status"][-1]
-    assert not controller.midi_manager.sent
-    assert not controller._s2k_engine.busy
+
+
+def test_a_batch_the_server_refuses_after_upload_gives_its_reason(rig, tmp_path, monkeypatch):
+    controller, client, rec = rig
+    real_upload = client.upload
+
+    def refusing_upload(job_id, index, pcm):
+        job = real_upload(job_id, index, pcm)
+        job.update(state="failed", error={"code": "rehearsal_failed", "message": "not enough free sample headers"})
+        return job
+
+    monkeypatch.setattr(client, "upload", refusing_upload)
+    controller.send_file_queue([_entry(_wav(tmp_path, "a.wav"))])
+    assert wait_until(lambda: rec["finished"])
+    assert rec["finished"] == [False]
+    assert client.started == []
+    assert "not enough free sample headers" in rec["status"][-1]
 
 
 def test_a_busy_bus_is_retried(rig, tmp_path):
