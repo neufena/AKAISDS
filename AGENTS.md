@@ -15,6 +15,7 @@ and plans: `dev_docs/`.
 | multi files | `dev_docs/multi-save-load-progress.md`, `dev_docs/s3000-multi-file-format.md` |
 | a wrong Device ID / "scan for the sampler" | `dev_docs/device-id-scan-plan.md` (planned, not built) |
 | sending samples, Slice Editor, sample edits | "Sample send hardening", "Sample edits and the working copy", "Slice Editor" |
+| sample audio over SCSI (s2k-send server) | "Sample audio over SCSI: s2k-send" |
 | menus, shortcuts | "Menus and shortcuts" |
 | the Macintosh System 6 theme | "Macintosh System 6 theme", `dev_docs/system6-theme-roadmap.md` |
 | logs, bug reports | "Debug logging" |
@@ -237,6 +238,15 @@ Akai SDATA and generic SDS sends share ONE packet loop; every batch uses it.
 - Open loop is deliberate with no MIDI IN or Generic SDS. In S2000/S3000 mode with an input and a dead cable a send never starts (the pre-send RSLIST gets no reply): correct.
 - **Measured on a real S2000 (don't re-derive or "tune" without re-measuring):** closed loop ACKs a packet every ~50 ms; the header ACK takes ~270 ms. The theory that 40 ms open-loop pacing caused silent samples was disproved and reverted. **A new sample lands in the LOWEST FREE slot**: find a sent sample by NAME, never by the slot you asked for.
 - Tests: `tests/test_sampler_controller.py` (a fake `QTimer` fires immediately; monkeypatch `singleShot` to capture delays).
+
+## Sample audio over SCSI: s2k-send (proof of concept, 2026-11-18)
+
+`controller/s2k_transfers.py` + `core/s2k_client.py`: S2000/S3000 sample SEND and RECEIVE through an s2k-send server (a Raspberry Pi + PiSCSI talking to the S2000's SCSI-MIDI tunnel; HTTP API in that project's `API.md`). **Only sample audio goes this way**; lists, headers, renames and the Program Editor's writes stay on MIDI. Switched on by env `AKAISDS_S2K_SERVER` (a URL, or `1` for `http://piscsi.local:8420`); no Settings UI yet; `conftest` clears it. `SamplerController.send_file_queue`/`receive_samples` delegate when it is set and the model is `akai_s2000_s3000`, so the Dashboard and the Program Editor are unchanged.
+- **Our own client, written from `API.md`**: s2k-send's README says personal use only, so its code (`s2kclient.py`, `s2kcore.py`) is never vendored or copied here.
+- HTTP blocks: each operation runs on a plain worker thread posting to a `queue.Queue`, drained by a GUI-thread `QTimer` (no cross-thread Qt signals); a token drops events from an abandoned operation.
+- A send is ONE server job for the whole batch (the server rehearses it, sends, reads each sample back). The server takes only 44100/22050 Hz: other rates are resampled (<= 22050 -> 22050). Bit depth < 16 is bitcrushed. **A started job can't be cancelled** (the server's rule); cancel before start DELETEs the job.
+- A receive saves through `SamplerController.save_received_sample` (the `.s3` header is the server's `header_hex`).
+- **Checked 2026-11-18 against `s2kserver.py --mock` only** (simulated S2000): batch of mono + stereo, receive byte-identical, `.s3` parses. NOT tried: a real Pi/S2000, whether MIDI requests during/after a SCSI session behave (the server stops PiSCSI around each operation), slot numbering vs RSLIST on a real unit. Tests: `tests/test_s2k_transfers.py`.
 
 ## Program Editor UI
 

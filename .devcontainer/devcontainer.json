@@ -5,7 +5,8 @@
     // The uv and Nuitka caches are big and slow to recreate: keep them across rebuilds
     "mounts": [
         "source=akaisds-uv-cache,target=/home/vscode/.cache/uv,type=volume",
-        "source=akaisds-nuitka-cache,target=/home/vscode/.cache/Nuitka,type=volume"
+        "source=akaisds-nuitka-cache,target=/home/vscode/.cache/Nuitka,type=volume",
+        "source=${localWorkspaceFolder}/../s2k-send,target=/workspaces/s2k-send,type=bind,readonly"
     ],
     // Named volumes are created root-owned
     "postCreateCommand": "sudo chown -R $(id -u):$(id -g) ~/.cache && uv sync",
