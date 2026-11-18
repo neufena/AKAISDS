@@ -1336,8 +1336,7 @@ class SamplerController(QObject):
     # FILE QUEUE - drag and drop batch sending, per file settings
     # ---------------------------------------------------------
 
-    def send_file_queue(self, file_entries, channel=None, starting_sample_number=None, *, force_midi=False):
-        # force_midi: the s2k-send server refused the batch (a rate it can't take) - send it the ordinary way
+    def send_file_queue(self, file_entries, channel=None, starting_sample_number=None):
         if self._is_ensoniq():
             return self._ensoniq.send_file_queue(file_entries)
         if self._is_s950():
@@ -1345,8 +1344,8 @@ class SamplerController(QObject):
         if self.is_yamaha_model():
             # the unit's own bulk load (wave + sample dumps) - not Sample Dump Standard; see controller/yamaha_transfers.py
             return self._yamaha_transfers.send_file_queue(file_entries)
-        if self._s2k is not None and not force_midi:
-            return self._s2k.send_file_queue(file_entries, starting_sample_number)
+        if self._s2k is not None:
+            return self._s2k.send_file_queue(file_entries)
         if channel is None:
             channel = self.channel
         # send batch of local wav files, one after another without overwriting anything already on the hardware

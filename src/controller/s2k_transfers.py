@@ -11,8 +11,11 @@ queue; a QTimer on the GUI thread drains it (no cross-thread Qt signals, the sam
  - `send_file_queue(entries)`: ONE server job for the whole batch (the server rehearses it on a simulated S2000, then sends and reads
    every sample back). A stereo file becomes two mono samples `-L`/`-R`, named the way the MIDI path names them. Rates are what the MIDI path
    would send (the file's own, or the rate the queue entry asks for): nothing is resampled for the server, because the Program Editor
-   writes marker positions in the frames it sent. A server that refuses a rate (`bad_rate`: s2k-send 0.7 takes only 44100/22050 Hz)
-   gets nothing: the batch goes over MIDI instead. A job that has STARTED can't be cancelled.
+   writes marker positions in the frames it sent; the server takes any rate from 4000 to 65535 Hz and refuses the batch otherwise
+   (`bad_rate`, before anything is uploaded). A job that has STARTED can't be cancelled. A failed job's
+   evidence (transcript, audio sent) stays on the Pi: the log names the job and its `s2ksend --fetch-job` command. The S2000 links a
+   `-L`/`-R` pair by itself; the job result says whether it did and the log records it (a WARNING when not: AKAISDS names pairs
+   `NAME-L`, s2k-send pads the stem to 10 characters, and whether the S2000 links the unpadded form is unmeasured).
  - `receive_samples([(slot, path)])`: each sample's audio as PCM, saved like a MIDI receive (WAV and/or the Akai sample file, whose
    header comes from the server's own header read).
 """
@@ -37,6 +40,14 @@ _WRITE_PHASES = ("header", "audio")
 # the server answers 409 busy while its bus is in use (another client, or our own previous request still finishing)
 _BUSY_RETRIES = 5
 _BUSY_WAIT_S = 1.0
+_NEEDS_ATTENTION = "The S2K server needs attention: power-cycle the S2000 and the Pi, then run s2ksend --recover"
+# what a failed job means for the user; anything else shows the server's own message
+_JOB_ERRORS = {
+    "verify_failed": "S2K transfer sent, but a sample didn't read back the same - check it before using it",
+    "list_mismatch": "S2K transfer sent, but the S2000's sample list isn't what was expected: power-cycle the S2000 and the Pi, run "
+    "s2ksend --recover, then check the list",
+    "rehearsal_failed": "The S2K server refused the batch",
+}
 
 
 def server_url(configured=None):
@@ -121,7 +132,6 @@ class S2kTransfers:
         self._receive_total = 0
         self._receive_done = 0
         self._worker = None
-        self._starting_sample_number = None
 
     # -- plumbing ---------------------------------------------------------------------------------------------------
 
@@ -188,7 +198,9 @@ class S2kTransfers:
         if error.code == "busy":
             return "The S2K server's SCSI bus is busy - try again in a moment"
         if error.code == "needs_attention":
-            return "The S2K server needs attention: power-cycle the S2000 and the Pi, then recover the server"
+            return _NEEDS_ATTENTION
+        if error.code == "bad_rate":
+            return f"The S2K server can't take that sample rate ({s2k_client.MIN_RATE}-{s2k_client.MAX_RATE} Hz) - nothing was sent"
         return f"S2K server: {error.message or error.code}"
 
     def _on_status(self, message):
@@ -235,12 +247,11 @@ class S2kTransfers:
 
     # -- sending ----------------------------------------------------------------------------------------------------
 
-    def send_file_queue(self, entries, starting_sample_number=None):
+    def send_file_queue(self, entries):
         if not entries:
             return False
         if self._refuse_if_busy():
             return False
-        self._starting_sample_number = starting_sample_number
         self._entries = list(entries)
         self._units = []
         self._files_reported = set()
@@ -257,13 +268,7 @@ class S2kTransfers:
             self._post(token, "failed", "Nothing to send - no file could be read")
             return
         specs = [{"name": u["name"], "rate": u["rate"], "frames": len(u["samples"])} for u in units]
-        try:
-            job = self._call(self._client.create_job, specs)
-        except s2k_client.S2kError as e:
-            if e.code != "bad_rate":
-                raise
-            self._post(token, "fallback", e.message)
-            return
+        job = self._call(self._client.create_job, specs)
         job_id = job["id"]
         _log().info(f"S2kTransfers: job {job_id} created for {[s['name'] for s in specs]}")
         for i, unit in enumerate(units):
@@ -295,9 +300,18 @@ class S2kTransfers:
                 last_progress = progress
                 self._post(token, "progress", dict(progress))
             if snap["state"] in s2k_client.TERMINAL_STATES:
+                if snap["state"] == "failed":
+                    snap["bus_state"] = self._bus_state()
                 self._post(token, "send_ended", snap)
                 return
             time.sleep(_JOB_POLL_S)
+
+    def _bus_state(self):
+        # after a failed send: has the server stopped taking work until the S2000 and the Pi are power-cycled?
+        try:
+            return self._client.status().get("bus", {}).get("state")
+        except (s2k_client.S2kError, ValueError, AttributeError):
+            return None
 
     def _on_planned(self, units, skipped):
         self._units = units
@@ -306,15 +320,6 @@ class S2kTransfers:
             self._c.status_changed.emit(f"Skipping {os.path.basename(path)}: {reason}")
             self._files_reported.add(path)
             self._c.file_transferred.emit(path)
-
-    def _on_fallback(self, reason):
-        # the server refused a rate before anything was uploaded: send the batch (minus files already reported unreadable) over MIDI
-        entries = [e for e in self._entries if e["filepath"] not in self._files_reported]
-        _log().info(f"S2kTransfers: server refused a rate ({reason}) - sending {len(entries)} file(s) over MIDI")
-        self._finish()
-        self._c.status_changed.emit("The S2K server can't take this sample rate - sending over MIDI instead")
-        if not self._c.send_file_queue(entries, starting_sample_number=self._starting_sample_number, force_midi=True):
-            self._c.transfer_finished.emit(False)
 
     def _units_of_file(self, file_index):
         return [i for i, u in enumerate(self._units) if u["file"] == file_index]
@@ -365,11 +370,27 @@ class S2kTransfers:
                 if legs and all(leg in finished for leg in legs) and entry["filepath"] not in self._files_reported:
                     self._files_reported.add(entry["filepath"])
                     self._c.file_transferred.emit(entry["filepath"])
-            message = f"S2K transfer {state}: {error.get('message') or error.get('code') or state}"
-            if done_names:
+            code = error.get("code")
+            if code in _JOB_ERRORS:
+                message = _JOB_ERRORS[code]
+            elif code == "needs_attention" or snap.get("bus_state") == "needs_attention":
+                message = _NEEDS_ATTENTION
+            else:
+                message = f"S2K transfer {state}: {error.get('message') or code or state}"
+            if done_names and code != "list_mismatch":
                 message += f" ({len(done_names)} sample(s) did arrive)"
             ok = False
-        _log().info(f"S2kTransfers: send ended {state}: {result or error}")
+        job_id = snap.get("id")
+        _log().info(f"S2kTransfers: send ended {state} (job {job_id}): {result or error}")
+        if not ok and job_id:
+            _log().warning(f"S2kTransfers: job {job_id} failed ({error.get('code')}, bus {snap.get('bus_state')}); "
+                           f"evidence: s2ksend --server {self.url} --fetch-job {job_id}")
+        for pair in result.get("pairs", []):
+            linked = pair.get("linked")
+            state = "linked" if linked else "NOT linked"
+            line = f"S2kTransfers: stereo pair {pair.get('left')!r} / {pair.get('right')!r} {state} by the S2000"
+            partners = f" (partners {pair.get('left_partner')}/{pair.get('right_partner')})"
+            (_log().info if linked else _log().warning)(line + partners)
         self._finish()
         self._c.status_changed.emit(message)
         self._c.transfer_finished.emit(ok)

@@ -46,16 +46,21 @@ class FakeClient:
         self.audio = {}
         self.headers = {}
 
-    rates = (44100, 22050)
     busy_left = 0
+    fail_code = "send_failed"
+    bus_state = "idle"
+    pairs = ()
+
+    def status(self):
+        return {"server": "s2kserver", "version": "test", "bus": {"state": self.bus_state}}
 
     def create_job(self, specs, verify=True, block=16384):
         if self.busy_left:
             self.busy_left -= 1
             raise s2k_client.S2kError(409, "busy", "bus in use")
         for i, spec in enumerate(specs):
-            if self.rates is not None and spec["rate"] not in self.rates:
-                raise s2k_client.S2kError(400, "bad_rate", f"sample {i}: rate must be one of {list(self.rates)}")
+            if not s2k_client.MIN_RATE <= spec["rate"] <= s2k_client.MAX_RATE:
+                raise s2k_client.S2kError(400, "bad_rate", f"sample {i}: rate out of range")
         job_id = f"job{len(self.jobs)}"
         self.jobs[job_id] = {"id": job_id, "state": "awaiting_audio", "samples": specs}
         self.uploads[job_id] = {}
@@ -75,10 +80,14 @@ class FakeClient:
         names = [s["name"] for s in job["samples"]]
         if self.fail_with is not None:
             job["state"] = "failed"
-            job["error"] = {"code": "send_failed", "message": self.fail_with, "done": [{"name": names[0], "slot": 5}]}
+            job["error"] = {"code": self.fail_code, "message": self.fail_with, "done": [{"name": names[0], "slot": 5}]}
         else:
             job["state"] = "done"
-            job["result"] = {"samples": [{"name": n, "slot": 5 + i} for i, n in enumerate(names)], "overall_kbps": 66.5}
+            job["result"] = {
+                "samples": [{"name": n, "slot": 5 + i} for i, n in enumerate(names)],
+                "overall_kbps": 66.5,
+                "pairs": list(self.pairs),
+            }
         job["progress"] = {"phase": "verify_audio", "sample_index": len(names) - 1, "done": 10, "total": 10}
         return dict(job)
 
@@ -186,6 +195,45 @@ def test_a_failed_job_reports_only_the_files_that_arrived(rig, tmp_path):
     assert rec["finished"] == [False]
     assert rec["files"] == [a]
     assert "bus error" in rec["status"][-1]
+
+
+@pytest.mark.parametrize(
+    "code, bus, expected",
+    [
+        ("list_mismatch", "needs_attention", "sample list isn't what was expected"),
+        ("verify_failed", "idle", "didn't read back the same"),
+        ("send_failed", "needs_attention", "power-cycle the S2000 and the Pi"),
+        ("send_failed", "idle", "bus error"),
+    ],
+)
+def test_a_failed_job_says_what_to_do_next(rig, tmp_path, code, bus, expected):
+    controller, client, rec = rig
+    client.fail_with, client.fail_code, client.bus_state = "bus error", code, bus
+    controller.send_file_queue([_entry(_wav(tmp_path, "a.wav"))])
+    assert wait_until(lambda: rec["finished"])
+    assert rec["finished"] == [False]
+    assert expected in rec["status"][-1]
+
+
+def test_a_failed_job_logs_how_to_fetch_its_evidence(rig, tmp_path, monkeypatch):
+    controller, client, rec = rig
+    lines = []
+    monkeypatch.setattr(s2k_transfers._log(), "warning", lines.append)
+    client.fail_with = "bus error"
+    controller.send_file_queue([_entry(_wav(tmp_path, "a.wav"))])
+    assert wait_until(lambda: rec["finished"])
+    assert any("--fetch-job job0" in line for line in lines)
+
+
+def test_a_stereo_pair_the_s2000_did_not_link_is_a_warning(rig, tmp_path, monkeypatch):
+    controller, client, rec = rig
+    lines = []
+    monkeypatch.setattr(s2k_transfers._log(), "warning", lines.append)
+    client.pairs = [{"left": "LOOP-L", "right": "LOOP-R", "linked": False, "left_partner": None, "right_partner": None}]
+    controller.send_file_queue([_entry(_wav(tmp_path, "loop.wav", stereo=True))])
+    assert wait_until(lambda: rec["finished"])
+    assert rec["finished"] == [True]
+    assert any("NOT linked" in line for line in lines)
 
 
 def test_cancel_before_the_job_starts_cancels_it_on_the_server(rig, tmp_path, monkeypatch):
@@ -305,48 +353,21 @@ def test_the_controller_follows_the_settings_server(qapp, monkeypatch):  # noqa:
 
 def test_the_users_rate_choice_is_kept_and_nothing_else_is_resampled(rig, tmp_path):
     controller, client, rec = rig
-    client.rates = None  # a server that takes any rate
     path = _wav(tmp_path, "a.wav", rate=32000, frames=320)
     controller.send_file_queue([_entry(path), _entry(_wav(tmp_path, "b.wav"), sample_rate=11025)])
     assert wait_until(lambda: rec["finished"])
     assert [(s["rate"], s["frames"]) for s in client.jobs["job0"]["samples"]] == [(32000, 320), (11025, 25)]
 
 
-def test_a_rate_the_server_refuses_sends_the_batch_over_midi(rig, tmp_path, monkeypatch):
+def test_a_rate_the_server_refuses_fails_the_send_and_uploads_nothing(rig, tmp_path):
     controller, client, rec = rig
-    midi_batches = []
-    real_send = controller.send_file_queue
-
-    def spy(entries, channel=None, starting_sample_number=None, *, force_midi=False):
-        if force_midi:
-            midi_batches.append(([e["filepath"] for e in entries], starting_sample_number))
-            return True
-        return real_send(entries, channel, starting_sample_number, force_midi=force_midi)
-
-    monkeypatch.setattr(controller, "send_file_queue", spy)
-    good, odd = _wav(tmp_path, "good.wav"), _wav(tmp_path, "odd.wav", rate=32000)
-    missing = str(tmp_path / "missing.wav")
-    assert controller.send_file_queue([_entry(good), _entry(odd), _entry(missing)], starting_sample_number=7)
-    assert wait_until(lambda: midi_batches)
-    assert midi_batches == [([good, odd], 7)]  # the unreadable file was already reported, so it isn't sent again
-    assert client.jobs == {} and rec["finished"] == []
-    assert "sending over MIDI" in rec["status"][-1]
-    assert not controller._s2k_engine.busy
-
-
-def test_a_refused_midi_fallback_still_finishes_the_transfer(rig, tmp_path, monkeypatch):
-    controller, client, rec = rig
-    real_send = controller.send_file_queue
-    monkeypatch.setattr(
-        controller,
-        "send_file_queue",
-        lambda entries, channel=None, starting_sample_number=None, *, force_midi=False: (
-            False if force_midi else real_send(entries, channel, starting_sample_number)
-        ),
-    )
-    controller.send_file_queue([_entry(_wav(tmp_path, "odd.wav", rate=32000))])
+    controller.send_file_queue([_entry(_wav(tmp_path, "a.wav")), _entry(_wav(tmp_path, "hi.wav", rate=96000))])
     assert wait_until(lambda: rec["finished"])
     assert rec["finished"] == [False]
+    assert client.jobs == {}
+    assert "can't take that sample rate" in rec["status"][-1]
+    assert not controller.midi_manager.sent
+    assert not controller._s2k_engine.busy
 
 
 def test_a_busy_bus_is_retried(rig, tmp_path):

@@ -1,8 +1,9 @@
 """A small client for the s2k-send server (`s2kserver.py`, HTTP API version 1), which sends and receives Akai S2000 samples over SCSI from a
 Raspberry Pi with a PiSCSI board. Written from the server's API.md, standard library only.
 
-Audio over this API is raw 16-bit signed little-endian MONO PCM. s2k-send 0.7 takes only 44100 or 22050 Hz (anything else: `bad_rate`).
-Names are up to 12 characters of `NAME_CHARS`.
+Audio over this API is raw 16-bit signed little-endian MONO PCM at any rate from `MIN_RATE` to `MAX_RATE` (the server sets the
+header's bandwidth and pitch offset as `akai_sysex.build_sample_header_block` does); anything else is refused with `bad_rate` when the job
+is created. Names are up to 12 characters of `NAME_CHARS`. Written for the latest s2k-send: older servers are not supported.
 Every call blocks: run them off the GUI thread."""
 
 import json
@@ -12,9 +13,10 @@ import urllib.request
 API = "/v1"
 DEFAULT_URL = "http://piscsi.local:8420"
 DEFAULT_PORT = 8420
+MIN_RATE, MAX_RATE = 4000, 65535
 NAME_CHARS = frozenset("0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ#+-.")
 TERMINAL_STATES = ("done", "failed", "cancelled")
-# the server reads a whole sample over SCSI before it sends the first byte back (no progress, no streaming in s2k-send 0.7); the
+# the server reads a whole sample over SCSI before it sends the first byte back (no progress, no streaming); the
 # S2000's 32 MB of RAM at an assumed ~100 KB/s read would be ~5 minutes, so a download gets far longer than an ordinary request
 AUDIO_TIMEOUT_S = 900.0
 
