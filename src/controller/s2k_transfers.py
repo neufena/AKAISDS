@@ -9,8 +9,10 @@ the Program Editor need no changes. The HTTP calls block, so each operation runs
 queue; a QTimer on the GUI thread drains it (no cross-thread Qt signals, the same pattern as the Slice Editor's SuperFlux analysis).
 
  - `send_file_queue(entries)`: ONE server job for the whole batch (the server rehearses it on a simulated S2000, then sends and reads
-   every sample back). A stereo file becomes two mono samples `-L`/`-R`, named the way the MIDI path names them. The server takes only
-   44100 or 22050 Hz, so other rates are resampled (22050 Hz and below go as 22050). A job that has STARTED can't be cancelled.
+   every sample back). A stereo file becomes two mono samples `-L`/`-R`, named the way the MIDI path names them. Rates are what the MIDI path
+   would send (the file's own, or the rate the queue entry asks for): nothing is resampled for the server, because the Program Editor
+   writes marker positions in the frames it sent. A server that refuses a rate (`bad_rate`: s2k-send 0.7 takes only 44100/22050 Hz)
+   gets nothing: the batch goes over MIDI instead. A job that has STARTED can't be cancelled.
  - `receive_samples([(slot, path)])`: each sample's audio as PCM, saved like a MIDI receive (WAV and/or the Akai sample file, whose
    header comes from the server's own header read).
 """
@@ -32,6 +34,9 @@ _ON = ("1", "true", "yes", "on")
 _POLL_MS = 50
 _JOB_POLL_S = 0.3
 _WRITE_PHASES = ("header", "audio")
+# the server answers 409 busy while its bus is in use (another client, or our own previous request still finishing)
+_BUSY_RETRIES = 5
+_BUSY_WAIT_S = 1.0
 
 
 def server_url(configured=None):
@@ -74,7 +79,7 @@ def plan_units(entries, read_channels=sds_encoder.read_wav_channels):
             skipped.append((path, str(e)))
             continue
         base = entry.get("name") or os.path.splitext(os.path.basename(path))[0]
-        target = s2k_client.server_rate(entry.get("sample_rate") or rate)
+        target = entry.get("sample_rate") or rate
         bits = entry.get("bit_depth", 16)
         if len(channels) == 2 and not entry.get("mono", False):
             legs = [
@@ -115,6 +120,8 @@ class S2kTransfers:
         self._sent_units = 0
         self._receive_total = 0
         self._receive_done = 0
+        self._worker = None
+        self._starting_sample_number = None
 
     # -- plumbing ---------------------------------------------------------------------------------------------------
 
@@ -126,7 +133,30 @@ class S2kTransfers:
         self._started = False
         token = self._token
         self._timer.start()
-        threading.Thread(target=self._run_worker, args=(token, target, args), name=f"s2k-{mode}", daemon=True).start()
+        self._worker = threading.Thread(target=self._run_worker, args=(token, target, args), name=f"s2k-{mode}", daemon=True)
+        self._worker.start()
+
+    def _refuse_if_busy(self):
+        # True (with a status line) if a new operation can't start: one is running, a MIDI transfer is, or a cancelled request is still
+        # waiting for the server (an HTTP call can't be interrupted; starting another now would only get "bus busy")
+        if self.busy or self._c.is_sds_transfer_busy():
+            self._c.status_changed.emit("A transfer is already in progress - please wait for it to finish")
+            return True
+        if self._worker is not None and self._worker.is_alive():
+            self._c.status_changed.emit("Still finishing the last S2K server request - try again in a moment")
+            return True
+        return False
+
+    def _call(self, request, *args):
+        # one server request, retried for a while when the bus is busy
+        for attempt in range(_BUSY_RETRIES + 1):
+            try:
+                return request(*args)
+            except s2k_client.S2kError as e:
+                if e.code != "busy" or attempt == _BUSY_RETRIES or self._cancel.is_set():
+                    raise
+                _log().info(f"S2kTransfers: server busy, retrying ({attempt + 1}/{_BUSY_RETRIES})")
+                time.sleep(_BUSY_WAIT_S)
 
     def _run_worker(self, token, target, args):
         try:
@@ -205,12 +235,12 @@ class S2kTransfers:
 
     # -- sending ----------------------------------------------------------------------------------------------------
 
-    def send_file_queue(self, entries):
+    def send_file_queue(self, entries, starting_sample_number=None):
         if not entries:
             return False
-        if self.busy or self._c.is_sds_transfer_busy():
-            self._c.status_changed.emit("A transfer is already in progress - please wait for it to finish")
+        if self._refuse_if_busy():
             return False
+        self._starting_sample_number = starting_sample_number
         self._entries = list(entries)
         self._units = []
         self._files_reported = set()
@@ -227,7 +257,13 @@ class S2kTransfers:
             self._post(token, "failed", "Nothing to send - no file could be read")
             return
         specs = [{"name": u["name"], "rate": u["rate"], "frames": len(u["samples"])} for u in units]
-        job = self._client.create_job(specs)
+        try:
+            job = self._call(self._client.create_job, specs)
+        except s2k_client.S2kError as e:
+            if e.code != "bad_rate":
+                raise
+            self._post(token, "fallback", e.message)
+            return
         job_id = job["id"]
         _log().info(f"S2kTransfers: job {job_id} created for {[s['name'] for s in specs]}")
         for i, unit in enumerate(units):
@@ -235,7 +271,7 @@ class S2kTransfers:
                 self._client.cancel(job_id)
                 return
             self._post(token, "status", f"Uploading {unit['name']} to the S2K server ({i + 1}/{len(units)})...")
-            job = self._client.upload(job_id, i, s2k_client.pcm_from_samples(unit["samples"]))
+            job = self._call(self._client.upload, job_id, i, s2k_client.pcm_from_samples(unit["samples"]))
         if job.get("state") != "ready":
             error = job.get("error") or {}
             self._post(token, "failed", f"The S2K server refused the batch: {error.get('message') or job.get('state')}")
@@ -246,11 +282,11 @@ class S2kTransfers:
                 return
             self._started = True
         self._post(token, "status", "Sending over SCSI...")
-        self._client.start(job_id)
+        self._call(self._client.start, job_id)
         since = 0
         last_progress = None
         while True:
-            snap = self._client.job(job_id, since)
+            snap = self._call(self._client.job, job_id, since)
             for line in snap.get("log", []):
                 _log().info(f"S2kTransfers: server: {line.get('msg')}")
             since = snap.get("next", since)
@@ -270,9 +306,15 @@ class S2kTransfers:
             self._c.status_changed.emit(f"Skipping {os.path.basename(path)}: {reason}")
             self._files_reported.add(path)
             self._c.file_transferred.emit(path)
-        for unit in units:
-            if unit["rate"] != unit["source_rate"]:
-                _log().info(f"S2kTransfers: {unit['name']} resampled {unit['source_rate']} -> {unit['rate']} Hz")
+
+    def _on_fallback(self, reason):
+        # the server refused a rate before anything was uploaded: send the batch (minus files already reported unreadable) over MIDI
+        entries = [e for e in self._entries if e["filepath"] not in self._files_reported]
+        _log().info(f"S2kTransfers: server refused a rate ({reason}) - sending {len(entries)} file(s) over MIDI")
+        self._finish()
+        self._c.status_changed.emit("The S2K server can't take this sample rate - sending over MIDI instead")
+        if not self._c.send_file_queue(entries, starting_sample_number=self._starting_sample_number, force_midi=True):
+            self._c.transfer_finished.emit(False)
 
     def _units_of_file(self, file_index):
         return [i for i, u in enumerate(self._units) if u["file"] == file_index]
@@ -338,25 +380,25 @@ class S2kTransfers:
     def receive_samples(self, requests):
         """requests: [(slot, save path)] - slots are positions in the sampler's sample list."""
         if not requests:
-            return
-        if self.busy or self._c.is_sds_transfer_busy():
-            self._c.status_changed.emit("A transfer is already in progress - please wait for it to finish")
-            return
+            return False
+        if self._refuse_if_busy():
+            return False  # never a receive_finished from here: the Program Editor's wait connects first and skips on False
         self._receive_total = len(requests)
         self._receive_done = 0
         want_header = self._c.receive_format in ("s3", "both")
         _log().info(f"S2kTransfers: receive start: {len(requests)} sample(s) via {self.url}")
         self._begin("receive", self._receive_worker, list(requests), want_header)
+        return True
 
     def _receive_worker(self, token, requests, want_header):
         for number, (slot, path) in enumerate(requests, start=1):
             if self._cancel.is_set():
                 return
             self._post(token, "status", f"Receiving sample {slot} over SCSI ({number}/{len(requests)})...")
-            info, pcm = self._client.sample_audio(slot)
+            info, pcm = self._call(self._client.sample_audio, slot)
             raw_header = None
             if want_header:
-                header_hex = self._client.sample(slot).get("header_hex")
+                header_hex = self._call(self._client.sample, slot).get("header_hex")
                 raw_header = bytes.fromhex(header_hex) if header_hex else None
             self._post(token, "received", slot, path, info, s2k_client.samples_from_pcm(pcm), raw_header)
         self._post(token, "receive_ended")

@@ -46,7 +46,16 @@ class FakeClient:
         self.audio = {}
         self.headers = {}
 
+    rates = (44100, 22050)
+    busy_left = 0
+
     def create_job(self, specs, verify=True, block=16384):
+        if self.busy_left:
+            self.busy_left -= 1
+            raise s2k_client.S2kError(409, "busy", "bus in use")
+        for i, spec in enumerate(specs):
+            if self.rates is not None and spec["rate"] not in self.rates:
+                raise s2k_client.S2kError(400, "bad_rate", f"sample {i}: rate must be one of {list(self.rates)}")
         job_id = f"job{len(self.jobs)}"
         self.jobs[job_id] = {"id": job_id, "state": "awaiting_audio", "samples": specs}
         self.uploads[job_id] = {}
@@ -98,6 +107,7 @@ def rig(qapp, monkeypatch):  # noqa: F811
     controller._s2k_engine = s2k_transfers.S2kTransfers(controller, "http://pi.test:8420", client=client)
     monkeypatch.setattr(controller, "refresh_sample_list", lambda silent=False: None)
     monkeypatch.setattr(s2k_transfers, "_JOB_POLL_S", 0.0)
+    monkeypatch.setattr(s2k_transfers, "_BUSY_WAIT_S", 0.0)
     rec = {"finished": [], "files": [], "status": [], "received": [], "rx_finished": [], "unit": []}
     controller.transfer_finished.connect(rec["finished"].append)
     controller.file_transferred.connect(rec["files"].append)
@@ -134,7 +144,6 @@ def test_server_url_comes_from_the_environment(monkeypatch, value, expected):
 def test_names_and_rates_are_what_the_server_accepts():
     assert s2k_client.akai_name("kick_drum (1)!") == "KICK DRUM  1"
     assert s2k_client.akai_name("___") == "SAMPLE"
-    assert [s2k_client.server_rate(r) for r in (11025, 22050, 32000, 48000)] == [22050, 22050, 44100, 44100]
 
 
 def test_pcm_round_trips():
@@ -142,7 +151,7 @@ def test_pcm_round_trips():
     assert s2k_client.samples_from_pcm(s2k_client.pcm_from_samples(samples)) == samples
 
 
-def test_plan_splits_stereo_resamples_and_keeps_names_unique(tmp_path):
+def test_plan_splits_stereo_keeps_rates_and_names_unique(tmp_path):
     stereo = _wav(tmp_path, "loop.wav", stereo=True)
     low = _wav(tmp_path, "kick.wav", rate=11025, frames=50)
     again = _wav(tmp_path, "KICK.wav")
@@ -151,7 +160,7 @@ def test_plan_splits_stereo_resamples_and_keeps_names_unique(tmp_path):
     )
     assert [u["name"] for u in units] == ["LOOP-L", "LOOP-R", "KICK", "KICK2"]
     assert [u["file"] for u in units] == [0, 0, 1, 2]
-    assert units[2]["rate"] == 22050 and len(units[2]["samples"]) == 100
+    assert units[2]["rate"] == 11025 and len(units[2]["samples"]) == 50  # never resampled for the server
     assert [path for path, _ in skipped] == [str(tmp_path / "missing.wav")]
 
 
@@ -292,3 +301,103 @@ def test_the_controller_follows_the_settings_server(qapp, monkeypatch):  # noqa:
     assert controller._s2k.url == "http://pi.test:8420"
     controller.set_s2k_server(None)
     assert controller._s2k is None
+
+
+def test_the_users_rate_choice_is_kept_and_nothing_else_is_resampled(rig, tmp_path):
+    controller, client, rec = rig
+    client.rates = None  # a server that takes any rate
+    path = _wav(tmp_path, "a.wav", rate=32000, frames=320)
+    controller.send_file_queue([_entry(path), _entry(_wav(tmp_path, "b.wav"), sample_rate=11025)])
+    assert wait_until(lambda: rec["finished"])
+    assert [(s["rate"], s["frames"]) for s in client.jobs["job0"]["samples"]] == [(32000, 320), (11025, 25)]
+
+
+def test_a_rate_the_server_refuses_sends_the_batch_over_midi(rig, tmp_path, monkeypatch):
+    controller, client, rec = rig
+    midi_batches = []
+    real_send = controller.send_file_queue
+
+    def spy(entries, channel=None, starting_sample_number=None, *, force_midi=False):
+        if force_midi:
+            midi_batches.append(([e["filepath"] for e in entries], starting_sample_number))
+            return True
+        return real_send(entries, channel, starting_sample_number, force_midi=force_midi)
+
+    monkeypatch.setattr(controller, "send_file_queue", spy)
+    good, odd = _wav(tmp_path, "good.wav"), _wav(tmp_path, "odd.wav", rate=32000)
+    missing = str(tmp_path / "missing.wav")
+    assert controller.send_file_queue([_entry(good), _entry(odd), _entry(missing)], starting_sample_number=7)
+    assert wait_until(lambda: midi_batches)
+    assert midi_batches == [([good, odd], 7)]  # the unreadable file was already reported, so it isn't sent again
+    assert client.jobs == {} and rec["finished"] == []
+    assert "sending over MIDI" in rec["status"][-1]
+    assert not controller._s2k_engine.busy
+
+
+def test_a_refused_midi_fallback_still_finishes_the_transfer(rig, tmp_path, monkeypatch):
+    controller, client, rec = rig
+    real_send = controller.send_file_queue
+    monkeypatch.setattr(
+        controller,
+        "send_file_queue",
+        lambda entries, channel=None, starting_sample_number=None, *, force_midi=False: (
+            False if force_midi else real_send(entries, channel, starting_sample_number)
+        ),
+    )
+    controller.send_file_queue([_entry(_wav(tmp_path, "odd.wav", rate=32000))])
+    assert wait_until(lambda: rec["finished"])
+    assert rec["finished"] == [False]
+
+
+def test_a_busy_bus_is_retried(rig, tmp_path):
+    controller, client, rec = rig
+    client.busy_left = 2
+    controller.send_file_queue([_entry(_wav(tmp_path, "a.wav"))])
+    assert wait_until(lambda: rec["finished"])
+    assert rec["finished"] == [True]
+
+
+def test_nothing_new_starts_while_a_cancelled_request_is_still_out(rig, tmp_path, monkeypatch):
+    controller, client, rec = rig
+    gate = threading.Event()
+    client.audio = {0: (44100, [1, 2])}
+    real_audio = client.sample_audio
+
+    def slow_audio(slot):
+        gate.wait(5)
+        return real_audio(slot)
+
+    monkeypatch.setattr(client, "sample_audio", slow_audio)
+    assert controller.receive_samples([(0, str(tmp_path / "x.wav"))]) is True
+    controller.cancel_transfer()
+    assert rec["rx_finished"] == [False]
+    assert controller.receive_samples([(0, str(tmp_path / "y.wav"))]) is False
+    assert "Still finishing" in rec["status"][-1]
+    gate.set()
+    assert wait_until(lambda: not controller._s2k_engine._worker.is_alive())
+    assert controller.receive_samples([(0, str(tmp_path / "y.wav"))]) is True
+    assert wait_until(lambda: rec["rx_finished"] == [False, True])
+
+
+def test_a_sample_download_waits_longer_than_an_ordinary_request():
+    seen = []
+
+    class _Reply:
+        headers = {"X-S2K-Name": "KICK", "X-S2K-Rate": "44100", "X-S2K-Frames": "1", "X-S2K-Root": "60"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b"\x01\x00"
+
+    def opener(request, timeout):
+        seen.append(timeout)
+        return _Reply()
+
+    client = s2k_client.S2kClient("http://pi.test:8420", timeout=120.0, opener=opener)
+    info, pcm = client.sample_audio(3)
+    assert seen == [s2k_client.AUDIO_TIMEOUT_S] and info["frames"] == 1 and pcm == b"\x01\x00"

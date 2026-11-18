@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap
 from core import (
     app_config,
@@ -42,6 +42,7 @@ from ui import theme, tooltips
 from ui.loopback_results_dialog import LoopbackResultsDialog
 import os
 import sys
+import threading
 import time
 import mido
 
@@ -75,6 +76,20 @@ _MINIMUM_DIALOG_WIDTH = 560  # floor for the degenerate case - see
 # re-trigger the exact horizontal-scrollbar problem this whole calculation
 # exists to avoid
 _SCROLLBAR_WIDTH_ALLOWANCE = 32
+
+
+def _s2k_status_into(url, result):
+    # runs on a worker thread: one status request, its answer as a line for the Settings card, put in result["message"]
+    try:
+        status = s2k_client.S2kClient(url, timeout=3.0).status()
+    except s2k_client.S2kError as e:
+        result["message"] = f"Couldn't reach the server: {e.message or e.code}"
+        return
+    bus = status.get("bus") or {}
+    simulated = " (simulated S2000)" if bus.get("mock") else ""
+    result["message"] = (
+        f"Connected: {status.get('server', 'server')} {status.get('version', '')}, bus {bus.get('state', 'unknown')}{simulated}"
+    )
 
 
 def _minimum_width_for_pages(pages, minimum=_MINIMUM_DIALOG_WIDTH):
@@ -326,6 +341,11 @@ class MidiSettingsDialog(QDialog):
         self.label_s2k_status = QLabel()
         self.label_s2k_status.setWordWrap(True)
         form.addRow(self.label_s2k_status)
+        self._s2k_test_result = {}
+        self._s2k_test_url = ""
+        self._s2k_test_timer = QTimer(self)
+        self._s2k_test_timer.setInterval(50)
+        self._s2k_test_timer.timeout.connect(self._poll_s2k_test)
         self.combo_device_type.currentIndexChanged.connect(self._update_s2k_controls)
         self._update_s2k_controls()
         return form, build_section_card("Sample Transfers over SCSI", form)
@@ -344,21 +364,26 @@ class MidiSettingsDialog(QDialog):
         )
 
     def _test_s2k_server(self):
+        # off the GUI thread: a host that doesn't answer (or a slow .local name lookup) would otherwise freeze the dialog. A plain
+        # thread fills a dict; the dialog's own timer polls it (no cross-thread Qt signals), so closing the dialog early is safe
         url = s2k_client.normalize_url(self.edit_s2k_url.text())
         self.edit_s2k_url.setText(url)
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            status = s2k_client.S2kClient(url, timeout=3.0).status()
-        except s2k_client.S2kError as e:
-            message = f"Couldn't reach the server: {e.message or e.code}"
-        else:
-            bus = status.get("bus") or {}
-            simulated = " (simulated S2000)" if bus.get("mock") else ""
-            message = f"Connected: {status.get('server', 'server')} {status.get('version', '')}, bus {bus.get('state', 'unknown')}{simulated}"
-        finally:
-            QApplication.restoreOverrideCursor()
-        debug_log.get_logger().info(f"MidiSettingsDialog: s2k-send test {url}: {message}")
+        self.label_s2k_status.setText(f"Testing {url}\u2026")
+        set_enabled_without_scrolling(self.button_s2k_test, False)
+        self._s2k_test_result = result = {}
+        self._s2k_test_url = url
+        # the thread must never hold the dialog: if it dropped the last reference, Qt would destroy the dialog off the GUI thread
+        threading.Thread(target=_s2k_status_into, args=(url, result), name="s2k-test", daemon=True).start()
+        self._s2k_test_timer.start()
+
+    def _poll_s2k_test(self):
+        message = self._s2k_test_result.get("message")
+        if message is None:
+            return
+        self._s2k_test_timer.stop()
+        debug_log.get_logger().info(f"MidiSettingsDialog: s2k-send test {self._s2k_test_url}: {message}")
         self.label_s2k_status.setText(message)
+        set_enabled_without_scrolling(self.button_s2k_test, self._s2k_model_supported())
 
     # --- Troubleshooting tab --------------------------------------------------
 

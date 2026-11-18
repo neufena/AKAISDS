@@ -709,6 +709,18 @@ def test_s950_hardware_test_reports_no_answer(qapp, monkeypatch):
 # --- Sample Transfers over SCSI (s2k-send) card -------------------------------
 
 
+def _wait_for(predicate, timeout=5.0):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        QApplication.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.005)
+    return False
+
+
 def test_the_s2k_card_saves_and_applies_the_server(qapp):
     from core import app_config
 
@@ -746,6 +758,7 @@ def test_the_s2k_test_button_reports_an_unreachable_server(qapp, monkeypatch):
     monkeypatch.setattr(s2k_client.S2kClient, "status", unreachable)
     dialog = MidiSettingsDialog(_FakeMidiManager(["In A"], ["Out A"]), _FakeSamplerController())
     dialog._test_s2k_server()
+    assert _wait_for(lambda: dialog.button_s2k_test.isEnabled())
     assert dialog.label_s2k_status.text() == "Couldn't reach the server: can't reach it"
 
 
@@ -757,4 +770,6 @@ def test_the_s2k_test_button_reports_the_server(qapp, monkeypatch):
     )
     dialog = MidiSettingsDialog(_FakeMidiManager(["In A"], ["Out A"]), _FakeSamplerController())
     dialog._test_s2k_server()
+    assert not dialog.button_s2k_test.isEnabled() and dialog.label_s2k_status.text().startswith("Testing")
+    assert _wait_for(lambda: dialog.button_s2k_test.isEnabled())
     assert dialog.label_s2k_status.text() == "Connected: s2kserver 0.7.0, bus idle (simulated S2000)"
