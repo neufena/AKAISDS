@@ -5,6 +5,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import gc
 import io
 import json
 import threading
@@ -99,7 +100,24 @@ class FakeClient:
         self.jobs[job_id]["state"] = "cancelled"
         return dict(self.jobs[job_id])
 
-    def sample_audio(self, slot):
+    download_state = None  # e.g. "queued": a download job never gets further
+
+    def start_download(self, slot):
+        job_id = f"job{len(self.jobs)}"
+        job = {"id": job_id, "kind": "download", "slot": slot, "state": self.download_state or "done"}
+        if self.download_state is None:
+            if slot in self.audio:
+                frames = len(self.audio[slot][1])
+                job["progress"] = {"phase": "download", "done": 2 * frames, "total": 2 * frames}
+                job["result"] = {"slot": slot, "frames": frames}
+            else:
+                job["state"] = "failed"
+                job["error"] = {"code": "not_found", "message": f"no sample in slot {slot}"}
+        self.jobs[job_id] = job
+        return {**job, "state": "queued"}
+
+    def download_audio(self, job_id):
+        slot = self.jobs[job_id]["slot"]
         rate, samples = self.audio[slot]
         return {"name": f"S{slot}", "rate": rate, "frames": len(samples), "root": 60}, s2k_client.pcm_from_samples(samples)
 
@@ -117,14 +135,21 @@ def rig(qapp, monkeypatch):  # noqa: F811
     monkeypatch.setattr(controller, "refresh_sample_list", lambda silent=False: None)
     monkeypatch.setattr(s2k_transfers, "_JOB_POLL_S", 0.0)
     monkeypatch.setattr(s2k_transfers, "_BUSY_WAIT_S", 0.0)
-    rec = {"finished": [], "files": [], "status": [], "received": [], "rx_finished": [], "unit": []}
+    rec = {"finished": [], "files": [], "status": [], "received": [], "rx_finished": [], "unit": [], "rx_progress": []}
     controller.transfer_finished.connect(rec["finished"].append)
     controller.file_transferred.connect(rec["files"].append)
     controller.status_changed.connect(rec["status"].append)
     controller.sample_received.connect(rec["received"].append)
     controller.receive_finished.connect(rec["rx_finished"].append)
     controller.unit_progress.connect(rec["unit"].append)
-    return controller, client, rec
+    controller.receive_progress.connect(lambda done, total: rec["rx_progress"].append((done, total)))
+    yield controller, client, rec
+    if client.hold is not None:
+        client.hold.set()
+    worker = controller._s2k_engine._worker
+    if worker is not None:
+        worker.join(5)
+    gc.collect()  # here, not on a later test's worker thread, where freeing Qt objects crashes
 
 
 def _wav(tmp_path, name, rate=44100, frames=100, stereo=False):
@@ -278,6 +303,27 @@ def test_receive_saves_each_sample_as_a_wav(rig, tmp_path):
     assert rec["received"] == paths
     assert sds_encoder.read_wav_channels(paths[0]) == ([[1, 2, 3, -4]], 22050)
     assert not controller.midi_manager.sent
+    assert (4, 4) in rec["rx_progress"]
+    assert any("Receiving sample 3 over SCSI (1/2): 100%" in s for s in rec["status"])
+
+
+def test_an_empty_slot_fails_the_receive(rig, tmp_path):
+    controller, client, rec = rig
+    controller.receive_samples([(9, str(tmp_path / "x.wav"))])
+    assert wait_until(lambda: rec["rx_finished"])
+    assert rec["rx_finished"] == [False]
+    assert rec["status"][-1] == "There is no sample in slot 9 on the S2000"
+
+
+def test_cancelling_a_receive_cancels_its_queued_download_job(rig, tmp_path):
+    controller, client, rec = rig
+    client.download_state = "queued"
+    controller.receive_samples([(0, str(tmp_path / "x.wav"))])
+    assert wait_until(lambda: client.jobs)
+    controller.cancel_transfer()
+    assert rec["rx_finished"] == [False]
+    assert wait_until(lambda: client.cancelled == ["job0"])
+    assert not rec["received"]
 
 
 def test_an_unreachable_server_fails_the_receive(rig, tmp_path, monkeypatch):
@@ -286,7 +332,7 @@ def test_an_unreachable_server_fails_the_receive(rig, tmp_path, monkeypatch):
     def unreachable(slot):
         raise s2k_client.S2kError(0, "unreachable", "nope")
 
-    monkeypatch.setattr(client, "sample_audio", unreachable)
+    monkeypatch.setattr(client, "start_download", unreachable)
     controller.receive_samples([(0, str(tmp_path / "x.wav"))])
     assert wait_until(lambda: rec["rx_finished"])
     assert rec["rx_finished"] == [False]
@@ -409,13 +455,13 @@ def test_nothing_new_starts_while_a_cancelled_request_is_still_out(rig, tmp_path
     controller, client, rec = rig
     gate = threading.Event()
     client.audio = {0: (44100, [1, 2])}
-    real_audio = client.sample_audio
+    real_download = client.start_download
 
-    def slow_audio(slot):
+    def slow_download(slot):
         gate.wait(5)
-        return real_audio(slot)
+        return real_download(slot)
 
-    monkeypatch.setattr(client, "sample_audio", slow_audio)
+    monkeypatch.setattr(client, "start_download", slow_download)
     assert controller.receive_samples([(0, str(tmp_path / "x.wav"))]) is True
     controller.cancel_transfer()
     assert rec["rx_finished"] == [False]
@@ -427,7 +473,7 @@ def test_nothing_new_starts_while_a_cancelled_request_is_still_out(rig, tmp_path
     assert wait_until(lambda: rec["rx_finished"] == [False, True])
 
 
-def test_a_sample_download_waits_longer_than_an_ordinary_request():
+def test_a_finished_download_returns_its_audio_and_details():
     seen = []
 
     class _Reply:
@@ -443,9 +489,10 @@ def test_a_sample_download_waits_longer_than_an_ordinary_request():
             return b"\x01\x00"
 
     def opener(request, timeout):
-        seen.append(timeout)
+        seen.append(request.full_url)
         return _Reply()
 
-    client = s2k_client.S2kClient("http://pi.test:8420", timeout=120.0, opener=opener)
-    info, pcm = client.sample_audio(3)
-    assert seen == [s2k_client.AUDIO_TIMEOUT_S] and info["frames"] == 1 and pcm == b"\x01\x00"
+    client = s2k_client.S2kClient("http://pi.test:8420", opener=opener)
+    info, pcm = client.download_audio("abc")
+    assert seen == ["http://pi.test:8420/v1/jobs/abc/audio?format=pcm"]
+    assert info == {"name": "KICK", "rate": 44100, "frames": 1, "root": 60} and pcm == b"\x01\x00"

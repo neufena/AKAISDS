@@ -4,7 +4,8 @@ Raspberry Pi with a PiSCSI board. Written from the server's API.md, standard lib
 Audio over this API is raw 16-bit signed little-endian MONO PCM at any rate from `MIN_RATE` to `MAX_RATE` (the server sets the
 header's bandwidth and pitch offset as `akai_sysex.build_sample_header_block` does); anything else is refused with `bad_rate` when the job
 is created. Names are up to 12 characters of `NAME_CHARS`. Written for the latest s2k-send: older servers are not supported.
-Every call blocks: run them off the GUI thread."""
+Sending and receiving are both jobs (`create_job` / `start_download`), followed with `job()`. Every call blocks: run them off the GUI
+thread."""
 
 import json
 import urllib.error
@@ -16,9 +17,6 @@ DEFAULT_PORT = 8420
 MIN_RATE, MAX_RATE = 4000, 65535
 NAME_CHARS = frozenset("0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ#+-.")
 TERMINAL_STATES = ("done", "failed", "cancelled")
-# the server reads a whole sample over SCSI before it sends the first byte back (no progress, no streaming); the
-# S2000's 32 MB of RAM at an assumed ~100 KB/s read would be ~5 minutes, so a download gets far longer than an ordinary request
-AUDIO_TIMEOUT_S = 900.0
 
 
 class S2kError(Exception):
@@ -96,9 +94,14 @@ class S2kClient:
     def sample(self, slot):
         return self._json("GET", f"/samples/{int(slot)}")
 
-    def sample_audio(self, slot):
-        """(info, pcm): info has name, rate, frames and root from the reply's headers; pcm is the raw audio."""
-        headers, data = self._request("GET", f"/samples/{int(slot)}/audio?format=pcm", timeout=max(self.timeout, AUDIO_TIMEOUT_S))
+    def start_download(self, slot):
+        """Queues a download job for the sample in `slot` (read-only, starts by itself). Follow it with `job()`: `progress` is
+        `{phase: "download", done, total}` in bytes; once it is `done`, fetch the audio with `download_audio`."""
+        return self._json("POST", f"/samples/{int(slot)}/download")
+
+    def download_audio(self, job_id):
+        """A finished download's (info, pcm): info has name, rate, frames and root from the reply's headers; pcm is the raw audio."""
+        headers, data = self._request("GET", f"/jobs/{job_id}/audio?format=pcm")
         info = {
             "name": headers.get("X-S2K-Name"),
             "rate": int(headers.get("X-S2K-Rate", 0)),

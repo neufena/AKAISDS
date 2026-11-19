@@ -16,8 +16,9 @@ queue; a QTimer on the GUI thread drains it (no cross-thread Qt signals, the sam
    evidence (transcript, audio sent) stays on the Pi: the log names the job and its `s2ksend --fetch-job` command. The S2000 links a
    `-L`/`-R` pair by itself; the job result says whether it did and the log records it (a WARNING when not: AKAISDS names pairs
    `NAME-L`, s2k-send pads the stem to 10 characters, and whether the S2000 links the unpadded form is unmeasured).
- - `receive_samples([(slot, path)])`: each sample's audio as PCM, saved like a MIDI receive (WAV and/or the Akai sample file, whose
-   header comes from the server's own header read).
+ - `receive_samples([(slot, path)])`: one download job per sample (progress in bytes while the S2000 is read), then its audio as PCM,
+   saved like a MIDI receive (WAV and/or the Akai sample file, whose header comes from the server's own header read). A download is
+   read-only, so a cancel just stops following it (a queued one is cancelled on the server, a running one is left to finish).
 """
 
 import os
@@ -46,6 +47,10 @@ _JOB_ERRORS = {
     "verify_failed": "S2K transfer sent, but a sample didn't read back the same - check it before using it",
     "list_mismatch": "S2K transfer sent, but the S2000's sample list isn't what was expected: power-cycle the S2000 and the Pi, run "
     "s2ksend --recover, then check the list",
+}
+_DOWNLOAD_ERRORS = {
+    "not_found": "There is no sample in slot {slot} on the S2000",
+    "verify_failed": "Sample {slot} didn't arrive at the size the S2000 reported - nothing saved",
 }
 
 
@@ -122,7 +127,9 @@ class S2kTransfers:
         self._mode = None
         self._token = 0
         self._events = queue.Queue()
-        self._timer = QTimer()
+        # owned by the controller: the engine may be replaced (a new server URL) and collected on any thread, which must not take a
+        # QTimer with it
+        self._timer = QTimer(controller)
         self._timer.setInterval(_POLL_MS)
         self._timer.timeout.connect(self._drain)
         self._lock = threading.Lock()
@@ -292,9 +299,22 @@ class S2kTransfers:
             self._started = True
         self._post(token, "status", "Sending over SCSI...")
         self._call(self._client.start, job_id)
+        snap = self._follow(job_id, lambda progress: self._post(token, "progress", progress))
+        if snap is not None:
+            self._post(token, "send_ended", snap)
+
+    def _follow(self, job_id, on_progress):
+        # polls a job until it ends: its final snapshot (with bus_state when it didn't finish), or None once cancelled. A cancel can
+        # only reach a send before it starts; a download is cancelled on the server if still queued, else left to finish
         since = 0
         last_progress = None
         while True:
+            if self._cancel.is_set():
+                try:
+                    self._client.cancel(job_id)
+                except s2k_client.S2kError as e:
+                    _log().info(f"S2kTransfers: job {job_id} left to finish on the server ({e.code})")
+                return None
             snap = self._call(self._client.job, job_id, since)
             for line in snap.get("log", []):
                 _log().info(f"S2kTransfers: server: {line.get('msg')}")
@@ -302,12 +322,13 @@ class S2kTransfers:
             progress = snap.get("progress")
             if progress and progress != last_progress:
                 last_progress = progress
-                self._post(token, "progress", dict(progress))
+                on_progress(dict(progress))
             if snap["state"] in s2k_client.TERMINAL_STATES:
                 if snap["state"] != "done":
                     snap["bus_state"] = self._bus_state()
-                self._post(token, "send_ended", snap)
-                return
+                    _log().warning(f"S2kTransfers: job {job_id} ended {snap['state']} ({(snap.get('error') or {}).get('code')}, bus "
+                                   f"{snap['bus_state']}); evidence: s2ksend --server {self.url} --fetch-job {job_id}")
+                return snap
             time.sleep(_JOB_POLL_S)
 
     def _bus_state(self):
@@ -388,11 +409,7 @@ class S2kTransfers:
             if done_names and code != "list_mismatch":
                 message += f" ({len(done_names)} sample(s) did arrive)"
             ok = False
-        job_id = snap.get("id")
-        _log().info(f"S2kTransfers: send ended {state} (job {job_id}): {result or error}")
-        if not ok and job_id:
-            _log().warning(f"S2kTransfers: job {job_id} ended {state} ({error.get('code')}, bus {snap.get('bus_state')}); "
-                           f"evidence: s2ksend --server {self.url} --fetch-job {job_id}")
+        _log().info(f"S2kTransfers: send ended {state} (job {snap.get('id')}): {result or error}")
         for pair in result.get("pairs", []):
             linked = pair.get("linked")
             link_state = "linked" if linked else "NOT linked"
@@ -424,13 +441,38 @@ class S2kTransfers:
             if self._cancel.is_set():
                 return
             self._post(token, "status", f"Receiving sample {slot} over SCSI ({number}/{len(requests)})...")
-            info, pcm = self._call(self._client.sample_audio, slot)
+            job_id = self._call(self._client.start_download, slot)["id"]
+            snap = self._follow(
+                job_id, lambda progress: self._post(token, "download_progress", slot, number, len(requests), progress)
+            )
+            if snap is None:
+                return
+            if snap["state"] != "done":
+                self._post(token, "failed", self._download_failure(slot, snap))
+                return
+            _log().info(f"S2kTransfers: download job {job_id} done: {snap.get('result')}")
+            info, pcm = self._call(self._client.download_audio, job_id)
             raw_header = None
             if want_header:
                 header_hex = self._call(self._client.sample, slot).get("header_hex")
                 raw_header = bytes.fromhex(header_hex) if header_hex else None
             self._post(token, "received", slot, path, info, s2k_client.samples_from_pcm(pcm), raw_header)
         self._post(token, "receive_ended")
+
+    def _download_failure(self, slot, snap):
+        error = snap.get("error") or {}
+        code = error.get("code")
+        if code == "needs_attention" or snap.get("bus_state") == "needs_attention":
+            return _NEEDS_ATTENTION
+        if code in _DOWNLOAD_ERRORS:
+            return _DOWNLOAD_ERRORS[code].format(slot=slot)
+        return f"S2K receive of sample {slot} {snap['state']}: {error.get('message') or code or snap['state']}"
+
+    def _on_download_progress(self, slot, number, count, progress):
+        done, total = progress.get("done", 0), progress.get("total", 0)
+        self._c.receive_progress.emit(done // 2, max(1, total // 2))
+        percent = int(100 * done / total) if total else 0
+        self._c.status_changed.emit(f"Receiving sample {slot} over SCSI ({number}/{count}): {percent}%")
 
     def _on_received(self, slot, path, info, samples, raw_header):
         self._receive_done += 1

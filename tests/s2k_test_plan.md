@@ -44,8 +44,10 @@ Note each s2k-send result before you start, because AKAISDS relies on it:
       after the gap.
 - [ ] **A3 Other rates.** Receive `T32` (s2k-send step 5b) with "Save received as: both": the WAV is 32000 Hz; `uv run python
       tools/s2000_sample_check.py show T32.s3` shows SSRATE 32000, SBANDW 1 and the pitch offset in STUNO.
-- [ ] **A4 Large receive** (several MB). Note how long it took. No progress is shown during a download; the status bar stays on
-      "Receiving sample N over SCSI". Over 15 minutes hits the client's timeout.
+- [ ] **A4 Large receive** (several MB). Note how long it took (the log's `download job ... done` line has `read_kbps`). The progress
+      bar and the status bar's "Receiving sample N over SCSI (1/1): N%" move while the S2000 is read.
+- [ ] **A4b Cancel a receive** of a large sample part-way: the Dashboard says cancelled at once; the log says the job was `left to
+      finish on the server (running)`; the next receive works once it has (`s2ksend --jobs` shows it `done`).
 - [ ] **A5 MIDI around SCSI.** Straight after a receive (inside the server's ~20 s keep-bus window), **Refresh** and open the
       **Program Editor**; again after 30 s. MIDI answers both times. The server stops PiSCSI around each operation; whether that
       touches the S2000's MIDI side is unknown.
@@ -81,7 +83,7 @@ Note each s2k-send result before you start, because AKAISDS relies on it:
 
 Use scratch samples. Header fields (markers, loop, tune, root) still go over MIDI after the audio goes over SCSI.
 
-- [ ] **C1** Samples tab: select a sample; its audio loads over SCSI (no progressive waveform: it appears at the end).
+- [ ] **C1** Samples tab: select a sample; its audio loads over SCSI with a percentage (no progressive waveform: it appears at the end).
 - [ ] **C2 Send to Sampler.** Trim a 44.1 kHz sample, Send to Sampler: it replaces the old one under the same name; markers, loop and
       pitch are right. Then the same with `T32`: the log's tuning line shows the new sample's SBANDW/SSRATE read back, and it plays
       at the same pitch as before.
@@ -97,8 +99,8 @@ Use scratch samples. Header fields (markers, loop, tune, root) still go over MID
 
 - [ ] **D1** Stop the server (`sudo systemctl stop s2k-server`), Send: "Couldn't reach the S2K server at ..." and nothing hangs. Start
       it again.
-- [ ] **D2** Start a send from `s2ksend` on another machine and, while it runs, a receive from AKAISDS: AKAISDS retries for ~5 s
-      (`server busy, retrying` in the log), then "bus is busy", or succeeds if the send finished in time.
+- [ ] **D2** Start a send from `s2ksend` on another machine and, while it runs, a receive from AKAISDS: the download job waits on the
+      server behind the send and then completes (or fails `busy` if the bus stays in use for 2 minutes).
 - [ ] **D3 Evidence.** For any AKAISDS job (a failed one if there was one, else the latest), run the logged or `s2ksend --jobs`
       `--fetch-job` command: the transcript and the WAVs sent arrive, and the WAVs are the audio AKAISDS meant to send.
 - [ ] **D4 Don't provoke `needs_attention`.** If a send ends in it on its own, the app should say to power-cycle the S2000 and the Pi
