@@ -188,7 +188,7 @@ def test_pcm_round_trips():
 def test_plan_splits_stereo_keeps_rates_and_names_unique(tmp_path):
     stereo = _wav(tmp_path, "loop.wav", stereo=True)
     low = _wav(tmp_path, "kick.wav", rate=11025, frames=50)
-    again = _wav(tmp_path, "KICK.wav")
+    again = _wav(tmp_path, "kick!.wav")  # not "KICK.wav": Windows file names ignore case, so that would overwrite kick.wav
     units, skipped = s2k_transfers.plan_units(
         [_entry(stereo), _entry(low), _entry(again), _entry(str(tmp_path / "missing.wav"))]
     )

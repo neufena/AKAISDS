@@ -106,35 +106,45 @@ Use scratch samples. Header fields (markers, loop, tune, root) still go over MID
 - [ ] **D4 Don't provoke `needs_attention`.** If a send ends in it on its own, the app should say to power-cycle the S2000 and the Pi
       and run `s2ksend --recover`. Do that, then A1 again.
 
-## Results (20/11/2026, owner's S2000, s2k-send `main` at ______)
+## Results (20/11/2026, owner's S2000, s2k-send `main` at 0.9.0.dev0, commit not recorded)
+
+App on a Windows PC (the plan was written for a Mac). The Pi's `s2ksend` is at `/opt/s2k-send/bin/s2ksend`.
 
 | Step | Result | Notes / job IDs |
 |---|---|---|
-| A1 slot numbers vs MIDI list | | |
-| A2 receive | | |
-| A3 receive 32 kHz, `.s3` header | | |
-| A4 large receive (size, time) | | |
-| A5 MIDI around SCSI | | |
-| B1 44.1 kHz (KB/s) | | |
-| B2 22.05 kHz | | |
-| B3 other rates over SCSI; SCSI vs MIDI header diff | | |
-| B4 stereo link: SCSI unpadded / MIDI | | |
-| B5 queue rate and bit depth | | |
-| B6 batch | | |
-| B7 `.rx2` from the Dashboard | | |
-| B8 duplicate name / no memory refused | | |
-| B8c 96 kHz refused | | |
-| B9 cancel | | |
-| C1 load audio | | |
-| C2 Send to Sampler (44.1k / 32k) | | |
-| C3 Duplicate | | |
-| C4 slices mono | | |
-| C5 slices stereo | | |
-| C6 Load Akai File | | |
-| C7 editor during a SCSI send | | |
-| D1 server down | | |
-| D2 busy bus | | |
-| D3 evidence fetch | | |
-| D4 needs_attention (if it happened) | | |
+| A1 slot numbers vs MIDI list | Pass | App list and server list identical, including after the gap |
+| A2 receive | Pass | `KICKA`, and `N03` from after the gap |
+| A3 receive 32 kHz, `.s3` header | Pass | WAV 32000 Hz; `.s3` SBANDW 1, SSRATE 32000, STUNO -1421 (-5.55 st) |
+| A4 large receive (size, time) | Pass, bar not smooth | 413-807 KB samples read in 2.6-3.5 s (about 200-230 KB/s); status line only reached 100% once per sample, no intermediate values logged. About 8 s fixed overhead before the read and 4-10 s after |
+| A4b cancel a receive | Pass, partly | Cancelled between samples of a 6-sample batch; "left to finish on the server (running)" case not exercised |
+| A5 MIDI around SCSI | Pass | Refresh and editor open fine after a receive and after 30 s. RSTAT no-reply warnings (3000 ms) at 15:35:38/15:35:50 and 16:09:50 |
+| B1 44.1 kHz (KB/s) | Pass | `KICK-808`, job 20261120-153922-70a503: write 215.7, verify 367 KB/s; status bar says 23 KB/s overall (includes rehearsal and set-up) |
+| B2 22.05 kHz | Pass | |
+| B3 other rates over SCSI; SCSI vs MIDI header diff | Pass | `T32B/T11B/T48B` job 20261120-154413-82a4f6. `T32B` (SCSI) vs `T32C` (MIDI): SBANDW, STUNO, SSRATE identical. **Differences:** SPTYPE 3 One-shot (SCSI) vs 2 No looping (MIDI), confirmed on the panel; MIDI copy has LOOPAT1 250, LDWELL1 and non-zero bytes 151-191 |
+| B4 stereo link: SCSI unpadded / MIDI | **Not linked** (SCSI); MIDI skipped | `LOOPS-L/-R` job 20261120-161016-3f79de: partners 0xffff/0xffff. Padded `LOOP2..5`, `LP-n 102` pairs are linked. MIDI half skipped: a 6,227-packet MIDI send froze the GUI (see below) |
+| B5 queue rate and bit depth | Pass | Job 20261120-161447-df7693: 22050 Hz and 44100 Hz (8-bit crushed by the app) |
+| B6 batch | Pass | Job 20261120-161703-252270 |
+| B7 `.rx2` from the Dashboard | **Mono only** | 4 mono slices `REX-1..4`; no stereo `.rx2` available |
+| B8 duplicate name / no memory refused | B8a pass; B8b skipped | Job 20261120-163334-cb2d85 refused: `already on the S2000: T32B`; nothing added. A second send of `KICK-808` earlier arrived as `KICK-8081` (renamed before the server) |
+| B8c 96 kHz refused | Pass | Synthetic `tone96k.wav` skipped, kick sent (job 20261120-163611-ce1bbc) |
+| B9 cancel | Pass | Cancelled while uploading: job `cancelled`, nothing added. After it started: "can't be stopped once it has started", job finished (20261120-164024-661340) |
+| C1 load audio | Pass | About 12 s for a 2 s sample; GUI stayed responsive (worst heartbeat 18 ms). **Needed a fix first** (below) |
+| C2 Send to Sampler (44.1k / 32k) | Pass | `KICK-808` replaced, no `-TMP` left; `T32C` tuning line: STUNO 64116 -> 64115, SBANDW 1 |
+| C3 Duplicate | Pass | `KICK-80 COPY` (STUNO 0), `T32B COPY` (STUNO 64115, SBANDW 1) |
+| C4 slices mono | **Blocked** | 8 slices sent, but "Failed to create program": program write got no reply within 2.0 s |
+| C5 slices stereo | Blocked | No stereo `.rx2`; program creation failing |
+| C6 Load Akai File | Pass | `KICKA (3).s3` (44.1k) and `T32.s3` (32k): tuning line STUNO 64115 kept. Button needs a sample selected first |
+| C7 editor during a SCSI send | Design-limited | Window switching is blocked during a transfer, so the editor can't be used during a Dashboard send. No errors in the log |
+| D1 server down | Pass | `Couldn't reach the S2K server at http://piscsi.local:8420`, nothing hung |
+| D2 busy bus | Pass | Download created 17:37:26 during a 75 s send, finished 17:38:05. Status bar shows nothing while queued |
+| D3 evidence fetch | Pass | `--fetch-job 20261120-172722-20cc8a` saved 4 WAVs and `transcript.log`; WAVs not compared to the originals |
+| D4 needs_attention (if it happened) | Did not happen | |
+
+Findings from this run:
+- **Program creation fails** (C4, and Duplicate Program twice, 17:08-17:12): the program write (function `0x07`) times out at 2.0 s with SCSI quiet. A failure with the same signature is in an earlier session. Cause not found. Ideas not tried: S2000 state after the 2026-10-10 incident, the Pi's presence on the SCSI bus, a power cycle.
+- **Bug fixed during the run:** `_wait_for_any_signal` let a later signal overwrite the first, so a SCSI audio load in the Program Editor ended as "couldn't receive" and every edit button stayed grey. The s2k receive emits `sample_received` and `receive_finished` back to back. Fixed (first signal wins) with a regression test.
+- **A large MIDI send froze the GUI** (a 6,227-packet stereo send at 16:01, SCSI off; "Not responding" after 4,093 packets) and left a process holding the MIDI ports until the USB interface was replugged, plus a partial `LOOPM-L`.
+- **Windows-only test failure fixed:** `test_plan_splits_stereo_keeps_rates_and_names_unique` overwrote `kick.wav` with `KICK.wav`.
+- The Pi's `sudo` asks for a password; `s2ksend --list` cycles the bus (PiSCSI stays stopped for a while after it).
 
 Then record what was measured, dated and with the unit, in AGENTS.md's s2k-send section, and remove "not yet on hardware" from what passed.
