@@ -5332,3 +5332,23 @@ def test_help_menu_is_the_standard_one(editor):
     assert "Open Log Folder" not in _texts(_menu(editor, "Hardware"))
     assert "Cancel Transfer" in _texts(_menu(editor, "Hardware"))
     assert [t for t in _texts(_menu(editor, "View")) if t.startswith("Zoom")] == ["Zoom In", "Zoom Out", "Zoom to Fit"]
+
+
+def test_wait_for_any_signal_returns_the_first_signal_when_two_fire_together(qapp):
+    # the s2k receive emits sample_received and receive_finished back to back from one timer callback, so both capture slots
+    # run before loop.exec() returns: the first must win, or a load of audio reads as "couldn't receive"
+    class Source(QObject):
+        first = Signal(str)
+        second = Signal(bool)
+
+    source = Source()
+
+    def start():
+        def fire():
+            source.first.emit("saved.wav")
+            source.second.emit(True)
+
+        QTimer.singleShot(0, fire)
+
+    which, args = ProgramEditorWindow._wait_for_any_signal(None, [source.first, source.second], start=start)
+    assert (which, args) == (0, ("saved.wav",))

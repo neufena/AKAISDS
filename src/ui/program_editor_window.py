@@ -8784,8 +8784,11 @@ class ProgramEditorWindow(QMainWindow):
 
         def _make_capture(index):
             def _capture(*args):
-                result["which"] = index
-                result["args"] = args
+                # the FIRST signal wins: the s2k receive emits sample_received and receive_finished back to back in one
+                # drain, so both slots run before loop.exec() returns, and the later one used to overwrite the first
+                if "which" not in result:
+                    result["which"] = index
+                    result["args"] = args
                 loop.quit()
 
             return _capture
