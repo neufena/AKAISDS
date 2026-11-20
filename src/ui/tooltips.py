@@ -664,3 +664,8 @@ YAMAHA_EXTERNAL_LOAD_BUTTON = (
     "once the file is saved."
 )
 YAMAHA_STAGE_SEND_BUTTON = "Send the edited version to the unit as a NEW sample. The A4000 can't overwrite a sample over MIDI, so the original stays."
+S2K_ENABLED = (
+    "Send and receive sample audio over SCSI through an s2k-send server (a Raspberry Pi with a PiSCSI board) instead of MIDI. "
+    "Much faster. Everything else still goes over MIDI. Akai S2000/S3000 only."
+)
+S2K_SERVER = "The s2k-send server's address, e.g. http://piscsi.local:8420. Home network only: the server has no password."

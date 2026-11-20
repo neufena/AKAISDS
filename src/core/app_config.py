@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from core import debug_log, sampler_models
+from core import debug_log, s2k_client, sampler_models
 
 CONFIG_PATH = Path.home() / ".akaisds/config.json"
 
@@ -318,6 +318,26 @@ def get_saved_external_auto_load():
 def save_external_auto_load(enabled):
     config = load_config()
     config["external_auto_load"] = bool(enabled)
+    save_config(config)
+
+
+DEFAULT_S2K_SERVER_URL = s2k_client.DEFAULT_URL
+
+
+def get_s2k_enabled():
+    # sample send/receive through an s2k-send server (SCSI) instead of MIDI; off unless the user turned it on
+    return load_config().get("s2k_enabled", False) is True
+
+
+def get_s2k_server_url():
+    url = load_config().get("s2k_server_url", DEFAULT_S2K_SERVER_URL)
+    return url.strip() if isinstance(url, str) and url.strip() else DEFAULT_S2K_SERVER_URL
+
+
+def save_s2k_settings(enabled, url):
+    config = load_config()
+    config["s2k_enabled"] = bool(enabled)
+    config["s2k_server_url"] = (url or "").strip() or DEFAULT_S2K_SERVER_URL
     save_config(config)
 
 

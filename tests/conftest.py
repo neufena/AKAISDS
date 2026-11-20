@@ -79,6 +79,7 @@ _app_config.CONFIG_PATH = _TEST_LOG_DIR / "config.json"
 
 # The Global tab's test switch must never leak in from a developer's shell: the locked-controls tests assume nothing is unlocked.
 os.environ.pop("AKAISDS_UNLOCK_GLOBAL", None)
+os.environ.pop("AKAISDS_S2K_SERVER", None)  # sample transfers stay on MIDI unless a test points them at a fake server
 
 
 import pytest as _pytest
