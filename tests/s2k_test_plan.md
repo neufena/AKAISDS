@@ -131,8 +131,8 @@ App on a Windows PC (the plan was written for a Mac). The Pi's `s2ksend` is at `
 | C1 load audio | Pass | About 12 s for a 2 s sample; GUI stayed responsive (worst heartbeat 18 ms). **Needed a fix first** (below) |
 | C2 Send to Sampler (44.1k / 32k) | Pass | `KICK-808` replaced, no `-TMP` left; `T32C` tuning line: STUNO 64116 -> 64115, SBANDW 1 |
 | C3 Duplicate | Pass | `KICK-80 COPY` (STUNO 0), `T32B COPY` (STUNO 64115, SBANDW 1) |
-| C4 slices mono | **Blocked** | 8 slices sent, but "Failed to create program": program write got no reply within 2.0 s |
-| C5 slices stereo | Blocked | No stereo `.rx2`; program creation failing |
+| C4 slices mono | **Blocked** | 8 slices sent, but "Failed to create program": program write got no reply within 2.0 s. **Duplicate Program also fails on the latest released version (owner, 20/11/2026), so this is not a regression of this branch** |
+| C5 slices stereo | Blocked | No stereo `.rx2`; program creation failing (same cause as C4) |
 | C6 Load Akai File | Pass | `KICKA (3).s3` (44.1k) and `T32.s3` (32k): tuning line STUNO 64115 kept. Button needs a sample selected first |
 | C7 editor during a SCSI send | Design-limited | Window switching is blocked during a transfer, so the editor can't be used during a Dashboard send. No errors in the log |
 | D1 server down | Pass | `Couldn't reach the S2K server at http://piscsi.local:8420`, nothing hung |
@@ -141,7 +141,7 @@ App on a Windows PC (the plan was written for a Mac). The Pi's `s2ksend` is at `
 | D4 needs_attention (if it happened) | Did not happen | |
 
 Findings from this run:
-- **Program creation fails** (C4, and Duplicate Program twice, 17:08-17:12): the program write (function `0x07`) times out at 2.0 s with SCSI quiet. A failure with the same signature is in an earlier session. Cause not found. Ideas not tried: S2000 state after the 2026-10-10 incident, the Pi's presence on the SCSI bus, a power cycle.
+- **Program creation fails** (C4, and Duplicate Program twice, 17:08-17:12): the program write (function `0x07`) times out at 2.0 s with SCSI quiet. A failure with the same signature is in an earlier session. Cause not found; **the owner reproduced Duplicate Program failing on the latest released version too (20/11/2026), so it is not caused by this branch or by SCSI.** Ideas not tried: S2000 state after the 2026-10-10 incident, the Pi's presence on the SCSI bus, a power cycle.
 - **Bug fixed during the run:** `_wait_for_any_signal` let a later signal overwrite the first, so a SCSI audio load in the Program Editor ended as "couldn't receive" and every edit button stayed grey. The s2k receive emits `sample_received` and `receive_finished` back to back. Fixed (first signal wins) with a regression test.
 - **A large MIDI send froze the GUI** (a 6,227-packet stereo send at 16:01, SCSI off; "Not responding" after 4,093 packets) and left a process holding the MIDI ports until the USB interface was replugged, plus a partial `LOOPM-L`.
 - **Windows-only test failure fixed:** `test_plan_splits_stereo_keeps_rates_and_names_unique` overwrote `kick.wav` with `KICK.wav`.
