@@ -15,7 +15,7 @@ and plans: `dev_docs/`.
 | multi files | `dev_docs/multi-save-load-progress.md`, `dev_docs/s3000-multi-file-format.md` |
 | a wrong Device ID / "scan for the sampler" | `dev_docs/device-id-scan-plan.md` (planned, not built) |
 | sending samples, Slice Editor, sample edits | "Sample send hardening", "Sample edits and the working copy", "Slice Editor" |
-| sample audio over SCSI (s2k-send server) | "Sample audio over SCSI: s2k-send" |
+| sample audio over SCSI (s2k-send server) | "Sample audio over SCSI: s2k-send", `dev_docs/s2k-hardware-test-handover-2026-11-20.md` (open fixes) |
 | menus, shortcuts | "Menus and shortcuts" |
 | the Macintosh System 6 theme | "Macintosh System 6 theme", `dev_docs/system6-theme-roadmap.md` |
 | logs, bug reports | "Debug logging" |
