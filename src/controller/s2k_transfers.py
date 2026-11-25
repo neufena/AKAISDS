@@ -9,13 +9,13 @@ the Program Editor need no changes. The HTTP calls block, so each operation runs
 queue; a QTimer on the GUI thread drains it (no cross-thread Qt signals, the same pattern as the Slice Editor's SuperFlux analysis).
 
  - `send_file_queue(entries)`: ONE server job for the whole batch (the server rehearses it on a simulated S2000, then sends and reads
-   every sample back). A stereo file becomes two mono samples `-L`/`-R`, named the way the MIDI path names them. Rates are what the MIDI path
+   every sample back). A stereo file becomes two mono samples `-L`/`-R`, named the form the S2000 links (stem padded to 10). Rates are what the MIDI path
    would send (the file's own, or the rate the queue entry asks for): nothing is resampled for the server, because the Program Editor
    writes marker positions in the frames it sent; the server takes any rate from 4000 to 65535 Hz and refuses the batch otherwise
    (`bad_rate`, before anything is uploaded). A job that has STARTED can't be cancelled. A failed job's
    evidence (transcript, audio sent) stays on the Pi: the log names the job and its `s2ksend --fetch-job` command. The S2000 links a
-   `-L`/`-R` pair by itself; the job result says whether it did and the log records it (a WARNING when not: AKAISDS names pairs
-   `NAME-L`, s2k-send pads the stem to 10 characters, and whether the S2000 links the unpadded form is unmeasured).
+   `-L`/`-R` pair by itself when the names are padded to 10 (measured 2026-11-20: unpadded pairs are NOT linked); the job result says
+   whether it did and the log records it (a WARNING when not).
  - `receive_samples([(slot, path)])`: one download job per sample (progress in bytes while the S2000 is read), then its audio as PCM,
    saved like a MIDI receive (WAV and/or the Akai sample file, whose header comes from the server's own header read). A download is
    read-only, so a cancel just stops following it (a queued one is cancelled on the server, a running one is left to finish).
@@ -102,8 +102,8 @@ def plan_units(entries, read_channels=sds_encoder.read_wav_channels):
         bits = entry.get("bit_depth", 16)
         if len(channels) == 2 and not entry.get("mono", False):
             legs = [
-                (akai_sysex.build_stereo_channel_name(base, "-L"), channels[0]),
-                (akai_sysex.build_stereo_channel_name(base, "-R"), channels[1]),
+                (akai_sysex.build_padded_pair_name(base, "-L"), channels[0]),
+                (akai_sysex.build_padded_pair_name(base, "-R"), channels[1]),
             ]
         else:
             legs = [(base, channels[0])]
