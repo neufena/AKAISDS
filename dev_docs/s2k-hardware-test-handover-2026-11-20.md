@@ -19,7 +19,7 @@ results), `3675940` (note that Duplicate Program also fails on the release). Tes
 
 ## To fix or decide (most important first)
 
-1. **Program creation over MIDI times out.** The program write (`send_and_receive` of function `0x07`) gets no reply within 2.0 s: Slice Editor
+1. **[RESOLVED 2026-11-25: caused by the hardware MIDI router, now bypassed; C4 and C5 can be run.]** **Program creation over MIDI times out.** The program write (`send_and_receive` of function `0x07`) gets no reply within 2.0 s: Slice Editor
    "Create program" (17:08:54), and Duplicate Program twice (17:10:42, 17:12:27), SCSI quiet. A failure with the same signature is in an older
    session in the log. **The owner reproduced Duplicate Program failing on the latest RELEASED version**, so it is not from this branch or from
    SCSI. Reads, header writes and sample sends all work. AGENTS.md says the Slice Editor path was proven on this S2000 on 2026-10-07; the drive
