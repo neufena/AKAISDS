@@ -1,4 +1,5 @@
 from PySide6.QtCore import QObject, Signal, QTimer
+from controller import s2k_transfers
 from core import akai_sample_file, akai_sysex, sds_encoder, midi_identity, debug_log, sampler_models, sysex_trace
 import os
 import time
@@ -76,6 +77,8 @@ class SamplerController(QObject):
         self._ensoniq_engine = None  # built on first use - see _ensoniq
         self._yamaha_transfers_engine = None  # the Dashboard's Yamaha list/receive - see _yamaha_transfers
         self._yamaha_engine = None  # built on first use - see _yamaha
+        self._s2k_engine = None  # sample audio over SCSI through an s2k-send server - see _s2k
+        self.s2k_server = None  # that server's URL from Settings; None = samples go over MIDI
 
         self._open_loop_delay_ms = 40  # pacing for open loop sending
         # replies stopped MID-send after the sampler had been handshaking: finish the sample
@@ -264,6 +267,20 @@ class SamplerController(QObject):
 
     def is_yamaha_idle(self):
         return self._yamaha_engine is None or self._yamaha_engine.idle
+
+    @property
+    def _s2k(self):
+        # the s2k-send server, when it is switched on and the model is an S2000/S3000; None keeps sample transfers on MIDI
+        url = s2k_transfers.server_url(self.s2k_server)
+        if url is None or self.device_type != "akai" or self.sampler_model != sampler_models.AKAI_S2000_S3000:
+            return None
+        if self._s2k_engine is None or self._s2k_engine.url != url:
+            self._s2k_engine = s2k_transfers.S2kTransfers(self, url)
+        return self._s2k_engine
+
+    def set_s2k_server(self, url):
+        self.s2k_server = url or None
+        debug_log.get_logger().info(f"SamplerController: sample transfers via {'s2k-send server ' + url if url else 'MIDI'}")
 
     def _s950_not_supported(self, what):
         # The S900/S950 speak neither protocol the Akai-family and generic-SDS
@@ -1327,6 +1344,12 @@ class SamplerController(QObject):
         if self.is_yamaha_model():
             # the unit's own bulk load (wave + sample dumps) - not Sample Dump Standard; see controller/yamaha_transfers.py
             return self._yamaha_transfers.send_file_queue(file_entries)
+        if self._s2k is not None:
+            if starting_sample_number is not None:
+                debug_log.get_logger().info(
+                    f"S2kTransfers: starting sample number {starting_sample_number} ignored - the server appends new samples"
+                )
+            return self._s2k.send_file_queue(file_entries)
         if channel is None:
             channel = self.channel
         # send batch of local wav files, one after another without overwriting anything already on the hardware
@@ -1560,6 +1583,8 @@ class SamplerController(QObject):
             # the unit's native wave dumps (both channels of a stereo sample) instead of Sample Dump Standard
             self._yamaha_transfers.receive_samples(sample_requests)
             return
+        if self._s2k is not None:
+            return self._s2k.receive_samples(sample_requests)
         if channel is None:
             channel = self.channel
         # download batch of samples from hardware, one after another, saving each as wav file
@@ -1798,7 +1823,7 @@ class SamplerController(QObject):
             : info["sample_length"]
         ]  # trim any padding words past the real length (ie, trailing zeroes)
 
-        saved_path, note = self._save_received_sample(info, samples)
+        saved_path, note = self.save_received_sample(self._receive_save_path, self._receive_sample_number, info, samples)
 
         debug_log.get_logger().info(
             f"SamplerController: receive finished slot={self._receive_sample_number} "
@@ -1814,13 +1839,12 @@ class SamplerController(QObject):
 
         QTimer.singleShot(300, self._receive_next_sample)
 
-    def _save_received_sample(self, info, samples):
+    def save_received_sample(self, wav_path, sample_number, info, samples):
         """Write a finished receive as `receive_format` says. Returns (the path to report, a note for the status line - '' when all went as asked).
 
         The Akai sample file (`core/akai_sample_file.py`) is the sampler's own header block plus the audio. It is next to the WAV path (same name, the
         extension swapped). If it can't be made - not an Akai-mode receive, an incomplete sample, a disk error - the WAV is written instead, so a receive
         that asked for ONLY the Akai file never ends with nothing."""
-        wav_path = self._receive_save_path
         wanted = self.receive_format
         log = debug_log.get_logger()
         written = []
@@ -1839,7 +1863,7 @@ class SamplerController(QObject):
                 except (akai_sample_file.SampleFileError, OSError) as e:
                     problem = str(e)
             if problem:
-                log.warning(f"SamplerController: couldn't save the Akai sample file for slot {self._receive_sample_number}: {problem}")
+                log.warning(f"SamplerController: couldn't save the Akai sample file for slot {sample_number}: {problem}")
         if wanted in ("wav", "both") or not written:
             sds_encoder.write_wav_file(wav_path, samples, info["sample_rate"], info["bit_depth"])
             written.insert(0, wav_path)
@@ -1856,6 +1880,8 @@ class SamplerController(QObject):
         if self._ensoniq_engine is not None and self._ensoniq_engine.cancel():
             return
         if self._yamaha_transfers_engine is not None and self._yamaha_transfers_engine.cancel():
+            return
+        if self._s2k_engine is not None and self._s2k_engine.cancel():
             return
         in_progrss = (
             bool(self._send_queue)
@@ -1949,6 +1975,7 @@ class SamplerController(QObject):
             or (self._s950_engine is not None and self._s950_engine.busy)
             or (self._ensoniq_engine is not None and self._ensoniq_engine.busy)
             or (self._yamaha_transfers_engine is not None and self._yamaha_transfers_engine.busy)
+            or (self._s2k_engine is not None and self._s2k_engine.busy)
         )
 
     def _send_current_packet(self):

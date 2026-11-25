@@ -35,6 +35,9 @@ class ApplicationWindow(QMainWindow):
         # restore saved channel/device type BEFORE building dashboard so the UI will be correct
         self.sampler_controller.set_channel(app_config.get_saved_channel())
         self.sampler_controller.set_device_type(app_config.get_saved_device_type())
+        self.sampler_controller.set_s2k_server(
+            app_config.get_s2k_server_url() if app_config.get_s2k_enabled() else None
+        )
 
         # reconnect to whatever MIDI ports were used last time, if still exist
         self._restore_saved_ports()

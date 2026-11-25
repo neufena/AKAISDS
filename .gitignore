@@ -47,3 +47,4 @@ scratch_*.py
 src/core/native/
 AppDir/
 appimagetool-*.AppImage
+.devcontainer/devcontainer-lock.json

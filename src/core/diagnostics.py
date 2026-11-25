@@ -98,6 +98,7 @@ def log_session_config(reason):
             f"shared_midi_transport={shared_transport_enabled()} "
             f"theme={app_config.get_saved_theme()} "
             f"slice_detection={app_config.get_saved_slice_detection()} "
+            f"s2k={app_config.get_s2k_server_url() if app_config.get_s2k_enabled() else 'off'} "
             f"rx2_library={'ok' if rx2.is_available() else 'MISSING'} "
             f"flavor={flavor}"
         )
