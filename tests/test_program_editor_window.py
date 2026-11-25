@@ -5253,10 +5253,10 @@ def test_export_slices_sends_a_stereo_slice_as_a_left_and_a_right_sample(editor,
     assert success is True
     assert "2 stereo slices" in message and "4 samples" in message
     sent = fake_sampler.sent_entries
-    assert [e["name"] for e in sent] == ["LOOP-1-L", "LOOP-1-R", "LOOP-2-L", "LOOP-2-R"]
+    assert [e["name"] for e in sent] == ["LOOP-1    -L", "LOOP-1    -R", "LOOP-2    -L", "LOOP-2    -R"]
     assert [e["samples"] for e in sent] == [left[0], right[0], left[1], right[1]]
     assert all(e["mono"] is True for e in sent)  # each is a mono resident sample
-    for name, samples in zip(["LOOP-1-L", "LOOP-1-R", "LOOP-2-L", "LOOP-2-R"], [left[0], right[0], left[1], right[1]]):
+    for name, samples in zip(["LOOP-1    -L", "LOOP-1    -R", "LOOP-2    -L", "LOOP-2    -R"], [left[0], right[0], left[1], right[1]]):
         index = bridge.sample_list().index(name)
         header = {c[0]: c[2] for c in bridge.set_parameter_calls if c[1] == index}
         assert header["SPTYPE"] == 3 and header["SMPEND"] == len(samples) - 1
@@ -5279,8 +5279,8 @@ def test_create_program_from_stereo_slices_puts_left_in_zone_1_and_right_in_zone
         if index == new_index
     }
     for i, name in enumerate(names):
-        assert writes[(i, "SNAME1")] == name + "-L"
-        assert writes[(i, "SNAME2")] == name + "-R"
+        assert writes[(i, "SNAME1")] == name.ljust(10) + "-L"
+        assert writes[(i, "SNAME2")] == name.ljust(10) + "-R"
         assert writes[(i, "LONOTE")] == writes[(i, "HINOTE")] == 36 + i
     # everything else is written once, on keygroup 0, and inherited by the clones: Const Pitch on both zones, the whole velocity
     # range for both, left hard left and right hard right, zones 3-4 empty
@@ -5352,3 +5352,13 @@ def test_wait_for_any_signal_returns_the_first_signal_when_two_fire_together(qap
 
     which, args = ProgramEditorWindow._wait_for_any_signal(None, [source.first, source.second], start=start)
     assert (which, args) == (0, ("saved.wav",))
+
+
+def test_load_akai_file_is_enabled_before_any_sample_is_selected(qapp):
+    window = ProgramEditorWindow(QWidget(), bridge=FakeBridge())
+    try:
+        assert window.load_akai_button.isEnabled()
+        assert not window.save_akai_button.isEnabled()
+    finally:
+        window._worker.stop()
+        window._worker.wait()

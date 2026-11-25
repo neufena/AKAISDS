@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core import akai_sysex
 from core import app_config
 from core import debug_log
 from core import sample_slicing
@@ -177,6 +178,7 @@ class SliceEditorWindow(QDialog):
         program_confirm_message=None,
         initial_markers=None,
         channel_suffixes=None,
+        pad_channel_names=False,
         preview_pitch_shift_semitones=0,
     ):
         super().__init__(parent)
@@ -198,6 +200,7 @@ class SliceEditorWindow(QDialog):
         # ("-L", "-R") when each slice goes out as TWO resident samples (the Akai editor, whose samples are mono): the names
         # leave room for the suffix, and the clash check covers the suffixed names too. None = one sample per slice
         self._channel_suffixes = tuple(channel_suffixes) if channel_suffixes else None
+        self._pad_channel_names = pad_channel_names
         self._name_length = NAME_LENGTH - max((len(x) for x in self._channel_suffixes), default=0) if self._channel_suffixes else NAME_LENGTH
         # computed ONCE here, reused on every Sensitivity slider tick - see
         # transient_detection.compute_flux's own docstring on why
@@ -1003,16 +1006,21 @@ class SliceEditorWindow(QDialog):
             "freeze the interface."
         )
 
-    @staticmethod
-    def _stereo_confirm_message(slice_count, names, suffixes):
-        pair = f'"{names[0]}{suffixes[0]}" / "{names[0]}{suffixes[-1]}"'
+    def _stereo_confirm_message(self, slice_count, names, suffixes):
+        first, last = self._leg_name(names[0], suffixes[0]), self._leg_name(names[0], suffixes[-1])
+        pair = f'"{first}" / "{last}"'
         what = (
             f"as a stereo pair of samples ({pair})"
             if slice_count == 1
             else f"{slice_count} stereo slices as {slice_count * len(suffixes)} samples ({pair} .. "
-            f'"{names[-1]}{suffixes[0]}" / "{names[-1]}{suffixes[-1]}")'
+            f'"{self._leg_name(names[-1], suffixes[0])}" / "{self._leg_name(names[-1], suffixes[-1])}")'
         )
         return f"Send {what} to the sampler? This can take a while and will freeze the interface."
+
+    def _leg_name(self, name, suffix):
+        if self._pad_channel_names and suffix:
+            return akai_sysex.build_padded_pair_name(name, suffix)
+        return name + suffix
 
     def _confirm_export(self):
         # slice_count == 1 (no interior markers at all) is a valid, if
@@ -1047,7 +1055,7 @@ class SliceEditorWindow(QDialog):
             return
         existing = set(self._existing_names_provider())
         # what will really be resident: the slice names, or each with a channel suffix
-        resident = [n + suffix for n in names for suffix in (self._channel_suffixes or ("",))]
+        resident = [self._leg_name(n, suffix) for n in names for suffix in (self._channel_suffixes or ("",))]
         collisions = [n for n in resident if n in existing]
         if collisions:
             QMessageBox.warning(

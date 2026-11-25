@@ -100,6 +100,7 @@ from ui.shortcuts_dialog import (
 from ui.standard_menus import add_cancel_transfer_action, add_help_menu, build_zoom_actions
 from ui import tooltips as tt
 from core import debug_log, demo_timing, diagnostics
+from core import akai_sysex
 from core.akai_sysex import baseline_semitones_for_bandwidth
 from core import midi_manager as midi_manager_module
 from core import program_editor_bridge
@@ -204,6 +205,10 @@ _PREVIEW_ROOT_NOTE = preview_pitch.PREVIEW_ROOT_NOTE
 _IMPORT_ROOT_NOTE = 60
 # a stereo slice goes out as two mono samples: <slice name>-L (zone 1, panned left) and <slice name>-R (zone 2, panned right)
 _STEREO_SUFFIXES = ("-L", "-R")
+
+
+def _stereo_leg_name(stem, channel):
+    return akai_sysex.build_padded_pair_name(stem, _STEREO_SUFFIXES[channel])
 
 
 def _format_loop_hold(value):
@@ -5384,6 +5389,7 @@ class ProgramEditorWindow(QMainWindow):
             # a stereo loop: both channels shown, each slice sent as a -L/-R pair
             extra_channels=extra_channels,
             channel_suffixes=_STEREO_SUFFIXES if extra_channels else None,
+            pad_channel_names=True,
             preview_pitch_shift_semitones=preview_pitch_shift,
         )
         # the export reloads the sample list (wiping the cache), so keep the
@@ -5531,8 +5537,8 @@ class ProgramEditorWindow(QMainWindow):
             debug_log.get_logger().info(f"ProgramEditor: exporting {len(names)} stereo slices as {2 * len(names)} -L/-R samples")
             items = []
             for slice_index, slice_name in enumerate(names):
-                items.append((slice_name + _STEREO_SUFFIXES[0], slices[slice_index]))
-                items.append((slice_name + _STEREO_SUFFIXES[1], extra_slices[0][slice_index]))
+                items.append((_stereo_leg_name(slice_name, 0), slices[slice_index]))
+                items.append((_stereo_leg_name(slice_name, 1), extra_slices[0][slice_index]))
         else:
             items = list(zip(names, slices))
         resident_names = [n for n, _ in items]
@@ -5844,8 +5850,8 @@ class ProgramEditorWindow(QMainWindow):
             # left in zone 1, right in zone 2, each panned hard to its side (VPANO is the zone's pan OFFSET, -50..+50) over the
             # whole velocity range, so one key plays the pair together. Zones 3-4 stay empty.
             first_keygroup = (
-                ("SNAME1", names[0] + _STEREO_SUFFIXES[0]),
-                ("SNAME2", names[0] + _STEREO_SUFFIXES[1]),
+                ("SNAME1", _stereo_leg_name(names[0], 0)),
+                ("SNAME2", _stereo_leg_name(names[0], 1)),
                 ("SNAME3", ""),
                 ("SNAME4", ""),
                 ("CP1", 1),
@@ -5897,8 +5903,8 @@ class ProgramEditorWindow(QMainWindow):
             self._worker.submit_create_keygroup(new_index, 0)
             slice_zones = (
                 (
-                    ("SNAME1", names[slice_index] + _STEREO_SUFFIXES[0]),
-                    ("SNAME2", names[slice_index] + _STEREO_SUFFIXES[1]),
+                    ("SNAME1", _stereo_leg_name(names[slice_index], 0)),
+                    ("SNAME2", _stereo_leg_name(names[slice_index], 1)),
                 )
                 if stereo
                 else (("SNAME1", names[slice_index]),)
@@ -7002,6 +7008,10 @@ class ProgramEditorWindow(QMainWindow):
             tt.LOAD_AKAI_SAMPLE_BUTTON,
             self._load_akai_sample_from_file,
         )
+        # needs no sample selected (see _set_sample_edit_buttons_enabled), so it must not wait for the first selection to switch on
+        if not os.environ.get("AKAISDS_DEMO_SAMPLER"):
+            self._sample_control_wanted["load_akai"] = True
+            self._sample_edit_controls["load_akai"][0].setEnabled(True)
         self.external_edit_button = make(
             "external_edit",
             "Edit in External App\u2026",

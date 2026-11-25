@@ -192,7 +192,7 @@ def test_plan_splits_stereo_keeps_rates_and_names_unique(tmp_path):
     units, skipped = s2k_transfers.plan_units(
         [_entry(stereo), _entry(low), _entry(again), _entry(str(tmp_path / "missing.wav"))]
     )
-    assert [u["name"] for u in units] == ["LOOP-L", "LOOP-R", "KICK", "KICK2"]
+    assert [u["name"] for u in units] == ["LOOP      -L", "LOOP      -R", "KICK", "KICK2"]
     assert [u["file"] for u in units] == [0, 0, 1, 2]
     assert units[2]["rate"] == 11025 and len(units[2]["samples"]) == 50  # never resampled for the server
     assert [path for path, _ in skipped] == [str(tmp_path / "missing.wav")]
@@ -205,7 +205,7 @@ def test_a_batch_goes_as_one_job_and_reports_every_file(rig, tmp_path):
     assert wait_until(lambda: rec["finished"])
     assert rec["finished"] == [True]
     assert rec["files"] == [a, b]
-    assert [s["name"] for s in client.jobs["job0"]["samples"]] == ["A", "B-L", "B-R"]
+    assert [s["name"] for s in client.jobs["job0"]["samples"]] == ["A", "B         -L", "B         -R"]
     assert len(client.uploads["job0"][0]) == 200
     assert not controller.midi_manager.sent
     assert not controller.is_transfer_busy()
@@ -496,3 +496,12 @@ def test_a_finished_download_returns_its_audio_and_details():
     info, pcm = client.download_audio("abc")
     assert seen == ["http://pi.test:8420/v1/jobs/abc/audio?format=pcm"]
     assert info == {"name": "KICK", "rate": 44100, "frames": 1, "root": 60} and pcm == b"\x01\x00"
+
+
+def test_padded_pair_name_is_the_stem_padded_to_ten():
+    from core import akai_sysex
+
+    assert akai_sysex.build_padded_pair_name("LOOP", "-L") == "LOOP      -L"
+    assert akai_sysex.build_padded_pair_name("LOOP2-1", "-R") == "LOOP2-1   -R"
+    assert akai_sysex.build_padded_pair_name("ABCDEFGHIJKL", "-L") == "ABCDEFGHIJ-L"
+    assert akai_sysex.build_padded_pair_name("AB  ", "-L") == "AB        -L"

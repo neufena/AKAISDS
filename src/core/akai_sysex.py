@@ -91,6 +91,12 @@ def build_stereo_channel_name(base_name, suffix, total_length=12):
     return base_name[:max_base_length] + suffix
 
 
+def build_padded_pair_name(stem, suffix):
+    # the form the S2000 links as a stereo pair (measured 2026-11-20; an unpadded NAME-L / NAME-R is not linked): the stem padded to 10
+    # characters, then -L / -R as the last two of 12
+    return (stem[: 12 - len(suffix)].rstrip() or "SAMPLE").ljust(12 - len(suffix)) + suffix
+
+
 def build_dels_request(sample_number, channel=0):
     # build DELS (Delete Sample Header and Data) request
     # F0, 47, cc, DELS(0x14), 48, ss, ss, F7

@@ -62,10 +62,9 @@ Note each s2k-send result before you start, because AKAISDS relies on it:
       quit, start with `AKAISDS_S2K_SERVER=off uv run python src/main.py` (MIDI only), send `t32.wav` again under another name,
       receive both with "both" and `tools/s2000_sample_check.py diff A.s3 B.s3`: **SBANDW, STUNO and SSRATE should be identical**
       between the SCSI and MIDI copies. Record any difference. Quit and start normally again.
-- [ ] **B4 Stereo.** `loop.wav`: `LOOP-L` and `LOOP-R` arrive. AKAISDS doesn't pad the name the way s2k-send does (`LOOP      -L`),
-      so the log line `stereo pair 'LOOP-L' / 'LOOP-R' linked|NOT linked by the S2000` answers whether the S2000 links the unpadded
-      form. Check with `s2ksend --pairs`. Then send the same file over MIDI (`AKAISDS_S2K_SERVER=off`) under another name and check
-      `--pairs` again. Record both.
+- [ ] **B4 Stereo.** `loop.wav`: `LOOP      -L` and `LOOP      -R` arrive (AKAISDS pads the stem to 10, the only form the S2000 linked on
+      2026-11-20), and the log line `stereo pair ... linked by the S2000` says so. Check with `s2ksend --pairs`. Then send the same file
+      over MIDI (`AKAISDS_S2K_SERVER=off`) under another name (the MIDI path still sends unpadded `NAME-L`) and check `--pairs` again. Record both.
 - [ ] **B5 Rate and bit depth from the queue.** Two rows, set with their **Edit** dialog: one at Sample rate 22050, one at 8 bits: both go over SCSI, play
       at the right pitch, and the 8-bit one sounds crunchy.
 - [ ] **B6 Batch.** 3-4 mono files and one stereo in one queue run: each queue row ticks off as it lands; the list refreshes
